@@ -70,6 +70,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mekromn.apkbox.model.ApkRecord
+import com.mekromn.apkbox.model.ReplaceReason
+import com.mekromn.apkbox.model.ReplaceRequest
 import com.mekromn.apkbox.model.VaultStats
 import java.text.NumberFormat
 
@@ -80,12 +82,15 @@ fun ApkBoxScreen(
     stats: VaultStats,
     busy: Boolean,
     message: String?,
+    replaceRequest: ReplaceRequest?,
     onMessageShown: () -> Unit,
     onChooseBase: () -> Unit,
     onAddRevision: () -> Unit,
     onInstall: (ApkRecord) -> Unit,
     onDelete: (ApkRecord) -> Unit,
     onClearVault: () -> Unit,
+    onConfirmReplace: () -> Unit,
+    onCancelReplace: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
     var query by remember { mutableStateOf("") }
@@ -96,6 +101,7 @@ fun ApkBoxScreen(
     val base = records.firstOrNull { it.isBase }
     val visibleRevisions = records.filter { !it.isBase }.filter { record ->
         query.isBlank() || listOf(
+            record.displayName,
             record.label,
             record.versionName,
             record.versionCode.toString(),
@@ -167,7 +173,7 @@ fun ApkBoxScreen(
                     modifier = Modifier.navigationBarsPadding(),
                     onClick = onAddRevision,
                     icon = { Icon(Icons.Rounded.Add, null) },
-                    text = { Text("Add revision") },
+                    text = { Text("Add revisions") },
                 )
             }
         },
@@ -227,7 +233,7 @@ fun ApkBoxScreen(
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         shape = RoundedCornerShape(22.dp),
-                        placeholder = { Text("Search version, build code, or hash") },
+                        placeholder = { Text("Search filename, version, build code, or hash") },
                         leadingIcon = { Icon(Icons.Rounded.Search, null) },
                     )
                 }
@@ -252,7 +258,7 @@ fun ApkBoxScreen(
     deleteCandidate?.let { record ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
-            title = { Text("Delete ${record.versionName}?") },
+            title = { Text("Delete ${record.displayName}?") },
             text = { Text("Unused chunks will be removed automatically; shared chunks stay available to other revisions.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -279,6 +285,33 @@ fun ApkBoxScreen(
             },
             dismissButton = {
                 TextButton(onClick = { clearRequested = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    replaceRequest?.let { request ->
+        val installed = request.installedVersionName
+            ?.let { "$it (code ${request.installedVersionCode})" }
+            ?: "code ${request.installedVersionCode}"
+        val reason = when (request.reason) {
+            ReplaceReason.DOWNGRADE ->
+                "Android will not install this older revision over the currently installed $installed."
+            ReplaceReason.SIGNATURE_MISMATCH ->
+                "The selected revision is signed with a different certificate than the currently installed $installed."
+        }
+        AlertDialog(
+            onDismissRequest = onCancelReplace,
+            title = { Text("Replace installed app?") },
+            text = {
+                Text(
+                    "$reason\n\nTo switch to ${request.record.displayName}, APKbox must open Android's uninstall confirmation first, then install the selected revision. Uninstalling removes that app's local data. APKbox's stored revisions are not affected."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onConfirmReplace) { Text("Uninstall & install") }
+            },
+            dismissButton = {
+                TextButton(onClick = onCancelReplace) { Text("Cancel") }
             },
         )
     }
@@ -408,7 +441,7 @@ private fun EmptyRevisions(searching: Boolean) {
             Text(if (searching) "No matching revisions" else "No revisions yet", fontWeight = FontWeight.SemiBold)
             if (!searching) {
                 Text(
-                    "Add a build and APKbox will keep only chunks it hasn't already stored.",
+                    "Add one or many builds at once. APKbox keeps only chunks it hasn't already stored.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -445,11 +478,19 @@ private fun RevisionCard(
                     Icon(Icons.Rounded.Android, null, Modifier.padding(12.dp).size(28.dp))
                 }
                 Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                    Text(record.label, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "${record.versionName} · code ${record.versionCode}",
-                        style = MaterialTheme.typography.bodyMedium,
+                        record.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "${record.label} · ${record.versionName} · code ${record.versionCode}",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 if (onDelete != null) {
@@ -491,7 +532,7 @@ private fun RevisionCard(
                         Icon(Icons.Rounded.Shield, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
                         Spacer(Modifier.size(8.dp))
                         Text(
-                            "Different signing certificate — Android may require uninstalling the currently installed copy first.",
+                            "Different signing certificate — switching from another key requires replacing the installed app.",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
