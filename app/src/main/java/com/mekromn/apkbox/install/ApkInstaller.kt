@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import com.mekromn.apkbox.data.LibraryStore
+import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,6 +45,9 @@ class ApkInstaller(
     }
 
     suspend fun install(record: ApkRecord) = withContext(Dispatchers.IO) {
+        // Reclaim old full-size scratch APKs before asking Android for another large staging area.
+        TempStorageManager.cleanupRoutine(appContext)
+
         // Do not allow multiple full APK staging copies to accumulate in PackageInstaller.
         cleanupStaleSessions()
         val existingSessions = runCatching { installer.mySessions }.getOrDefault(emptyList())
