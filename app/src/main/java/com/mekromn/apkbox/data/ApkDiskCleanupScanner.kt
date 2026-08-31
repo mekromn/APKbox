@@ -52,14 +52,20 @@ object ApkDiskCleanupScanner {
 
         while (stack.isNotEmpty()) {
             val directory = stack.removeLast()
-            val canonical = runCatching { directory.canonicalPath }.getOrElse {
+            val canonical = try {
+                directory.canonicalPath
+            } catch (_: Throwable) {
                 unreadableDirectories++
                 continue
             }
             if (!seenDirectories.add(canonical)) continue
             visited++
 
-            val children = runCatching { directory.listFiles() }.getOrNull()
+            val children = try {
+                directory.listFiles()
+            } catch (_: Throwable) {
+                null
+            }
             if (children == null) {
                 unreadableDirectories++
                 continue
@@ -71,9 +77,6 @@ object ApkDiskCleanupScanner {
                         file.isDirectory -> stack.add(file)
                         file.isFile && file.extension.equals("apk", ignoreCase = true) -> apkFiles += file
                     }
-                }.onFailure {
-                    // A single broken directory entry is treated like an inaccessible child, not a
-                    // fatal scan error. Directory-level failures are already counted above.
                 }
             }
         }
@@ -105,11 +108,14 @@ object ApkDiskCleanupScanner {
             )
             .toList()
 
+        val unreadableFiles = matchResult.unreadablePaths.size
         return ScanResult(
             candidates = candidates,
             directoriesVisited = visited,
-            unreadableDirectories = unreadableDirectories,
-            unreadableFiles = matchResult.unreadablePaths.size,
+            // Existing cleanup UI already displays this field. Include unreadable APKs here too so
+            // the user immediately sees that the scan skipped something instead of a false clean bill.
+            unreadableDirectories = unreadableDirectories + unreadableFiles,
+            unreadableFiles = unreadableFiles,
         )
     }
 
