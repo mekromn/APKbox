@@ -28,6 +28,7 @@ import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ReplaceReason
 import com.mekromn.apkbox.model.ReplaceRequest
 import com.mekromn.apkbox.ui.ApkBoxScreen
+import com.mekromn.apkbox.ui.ApkCleanupScreen
 import com.mekromn.apkbox.ui.ApkFilePickerScreen
 import com.mekromn.apkbox.ui.ApkPickerMode
 import com.mekromn.apkbox.ui.ProjectsScreen
@@ -63,6 +64,7 @@ class MainActivity : ComponentActivity() {
     private val projectsOverviewRequested = MutableStateFlow(false)
     private val directFileAccess = MutableStateFlow(false)
     private val pendingSharedUris = MutableStateFlow<List<Uri>>(emptyList())
+    private val cleanupRequested = MutableStateFlow(false)
 
     private var installWaitingForPermission: ApkRecord? = null
     private var installWaitingForRemoval: ApkRecord? = null
@@ -106,6 +108,7 @@ class MainActivity : ComponentActivity() {
                 val overviewRequested = projectsOverviewRequested.collectAsStateWithLifecycle().value
                 val hasFileAccess = directFileAccess.collectAsStateWithLifecycle().value
                 val sharedUris = pendingSharedUris.collectAsStateWithLifecycle().value
+                val cleanupOpen = cleanupRequested.collectAsStateWithLifecycle().value
 
                 LaunchedEffect(projects, currentProjectId, overviewRequested) {
                     if (currentProjectId != null && projects.none { it.id == currentProjectId }) {
@@ -136,6 +139,15 @@ class MainActivity : ComponentActivity() {
                             onDismiss = { pendingSharedUris.value = emptyList() },
                             onAddToProject = ::importSharedToProject,
                             onCreateProject = ::createProjectFromShared,
+                        )
+                    }
+                    cleanupOpen -> {
+                        ApkCleanupScreen(
+                            projects = projects,
+                            records = records,
+                            hasDirectFileAccess = hasFileAccess,
+                            onRequestFileAccess = ::requestDirectFileAccess,
+                            onDismiss = { cleanupRequested.value = false },
                         )
                     }
                     currentPickerMode != null -> {
@@ -184,6 +196,7 @@ class MainActivity : ComponentActivity() {
                                     pickerProjectId.value = null
                                     pickerMode.value = ApkPickerMode.BASE
                                 },
+                                onCleanupApks = { cleanupRequested.value = true },
                                 onBackupVault = ::backupVault,
                                 onRestoreVault = ::restoreVault,
                             )
@@ -247,6 +260,7 @@ class MainActivity : ComponentActivity() {
         if (uris.isNotEmpty()) {
             pickerMode.value = null
             pickerProjectId.value = null
+            cleanupRequested.value = false
             pendingSharedUris.value = uris
         }
     }
