@@ -31,6 +31,7 @@ import kotlin.math.max
 class LibraryStore(context: Context) {
     companion object {
         private val MANIFEST_MAGIC = "APKBOXM1".toByteArray(Charsets.US_ASCII)
+        const val LEGACY_PROJECT_ID = "legacy-default-project"
     }
 
     private val appContext = context.applicationContext
@@ -50,8 +51,10 @@ class LibraryStore(context: Context) {
         rootDir.mkdirs()
         manifestsDir.mkdirs()
         val loaded = loadIndex()
-        _records = MutableStateFlow(loaded)
-        _stats = MutableStateFlow(calculateStats(loaded))
+        val repaired = repairMetadataFromManifests(loaded)
+        _records = MutableStateFlow(repaired)
+        _stats = MutableStateFlow(calculateStats(repaired))
+        if (repaired != loaded) runCatching { saveIndex(repaired) }
     }
 
     suspend fun importBase(uri: Uri): ImportResult = importApk(uri, isBase = true)
@@ -89,15 +92,21 @@ class LibraryStore(context: Context) {
                     error("That exact APK is already stored in APKbox.")
                 }
 
+                val authoritativeSize = chunking.chunks.sumOf { it.size.toLong() }
+                check(authoritativeSize == tempFile.length()) {
+                    "Import size verification failed before the APK was stored."
+                }
+
                 val id = UUID.randomUUID().toString()
                 val record = ApkRecord(
                     id = id,
+                    projectId = LEGACY_PROJECT_ID,
                     displayName = sourceDisplayName ?: archive.label,
                     label = archive.label,
                     packageName = archive.packageName,
                     versionName = archive.versionName,
                     versionCode = archive.versionCode,
-                    sizeBytes = tempFile.length(),
+                    sizeBytes = authoritativeSize,
                     sha256 = chunking.apkSha256,
                     signingCertSha256 = archive.signingCertSha256,
                     addedAtEpochMs = System.currentTimeMillis(),
@@ -151,10 +160,16 @@ class LibraryStore(context: Context) {
         }
     }
 
-    /** Streams an exact stored APK into [output] and verifies the original full-file SHA-256. */
+    /** Returns the APK size derived from its ordered manifest, never cached metadata. */
+    suspend fun authoritativeSize(record: ApkRecord): Long = withContext(Dispatchers.IO) {
+        mutex.withLock { readManifest(record.id).sumOf { it.size.toLong() } }
+    }
+
+    /** Streams an exact stored APK and verifies manifest byte count + original full-file SHA-256. */
     suspend fun streamApk(record: ApkRecord, output: OutputStream) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val chunks = readManifest(record.id)
+            val expectedSize = chunks.sumOf { it.size.toLong() }
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(256 * 1024)
             var written = 0L
@@ -178,14 +193,33 @@ class LibraryStore(context: Context) {
             }
             output.flush()
 
-            check(written == record.sizeBytes) {
-                "Reconstruction size mismatch: expected ${record.sizeBytes}, wrote $written."
+            check(written == expectedSize) {
+                "Reconstruction size mismatch: manifest requires $expectedSize bytes, wrote $written."
             }
             val actualSha = digest.digest().toHex()
             check(actualSha == record.sha256) {
-                "Reconstruction checksum mismatch. Installation was cancelled to protect the stored build."
+                "Reconstruction checksum mismatch. Operation cancelled to protect the stored build."
+            }
+
+            if (record.sizeBytes != expectedSize || record.chunkCount != chunks.size) {
+                val repaired = _records.value.map {
+                    if (it.id == record.id) it.copy(sizeBytes = expectedSize, chunkCount = chunks.size) else it
+                }
+                _records.value = repaired
+                saveIndex(repaired)
+                _stats.value = calculateStats(repaired)
             }
         }
+    }
+
+    private fun repairMetadataFromManifests(records: List<ApkRecord>): List<ApkRecord> = records.map { record ->
+        runCatching {
+            val chunks = readManifest(record.id)
+            val authoritativeSize = chunks.sumOf { it.size.toLong() }
+            if (record.sizeBytes != authoritativeSize || record.chunkCount != chunks.size) {
+                record.copy(sizeBytes = authoritativeSize, chunkCount = chunks.size)
+            } else record
+        }.getOrDefault(record)
     }
 
     private fun writeManifest(recordId: String, chunks: List<ChunkRef>) {
@@ -227,7 +261,7 @@ class LibraryStore(context: Context) {
     private fun saveIndex(records: List<ApkRecord>) {
         val array = JSONArray()
         records.forEach { record -> array.put(record.toJson()) }
-        val root = JSONObject().put("schema", 1).put("records", array)
+        val root = JSONObject().put("schema", 2).put("records", array)
         val temp = File(rootDir, ".library.json.tmp")
         FileOutputStream(temp).use { output ->
             output.write(root.toString().toByteArray(Charsets.UTF_8))
@@ -301,6 +335,7 @@ class LibraryStore(context: Context) {
 
     private fun ApkRecord.toJson(): JSONObject = JSONObject()
         .put("id", id)
+        .put("projectId", projectId)
         .put("displayName", displayName)
         .put("label", label)
         .put("packageName", packageName)
@@ -316,17 +351,18 @@ class LibraryStore(context: Context) {
 
     private fun JSONObject.toRecord(): ApkRecord = ApkRecord(
         id = getString("id"),
+        projectId = optString("projectId").takeIf { it.isNotBlank() } ?: LEGACY_PROJECT_ID,
         displayName = optString("displayName").takeIf { it.isNotBlank() } ?: getString("label"),
         label = getString("label"),
         packageName = getString("packageName"),
         versionName = getString("versionName"),
         versionCode = getLong("versionCode"),
-        sizeBytes = getLong("sizeBytes"),
+        sizeBytes = optLong("sizeBytes", 0L),
         sha256 = getString("sha256"),
         signingCertSha256 = if (isNull("signingCertSha256")) null else getString("signingCertSha256"),
         addedAtEpochMs = getLong("addedAtEpochMs"),
         isBase = getBoolean("isBase"),
-        chunkCount = getInt("chunkCount"),
-        newBytesAdded = getLong("newBytesAdded"),
+        chunkCount = optInt("chunkCount", 0),
+        newBytesAdded = optLong("newBytesAdded", 0L),
     )
 }
