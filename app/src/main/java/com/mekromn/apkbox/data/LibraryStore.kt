@@ -10,10 +10,13 @@ import com.mekromn.apkbox.model.IconRegenerationOutcome
 import com.mekromn.apkbox.model.IconRegenerationSummary
 import com.mekromn.apkbox.model.ImportResult
 import com.mekromn.apkbox.model.VaultStats
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -29,6 +32,7 @@ import java.io.FileOutputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
 class LibraryStore(context: Context) {
@@ -43,8 +47,12 @@ class LibraryStore(context: Context) {
     private val iconsDir = File(rootDir, "icons")
     private val indexFile = File(rootDir, "library.json")
     private val projectsFile = File(rootDir, "projects.json")
+    private val statsFile = File(rootDir, "stats.json")
     private val chunkStore = ChunkStore(File(rootDir, "chunks"))
     private val mutex = Mutex()
+    private val statsRefreshMutex = Mutex()
+    private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val statsGeneration = AtomicLong(0L)
 
     private val _projects: MutableStateFlow<List<ApkProject>>
     val projects: StateFlow<List<ApkProject>> get() = _projects.asStateFlow()
@@ -59,17 +67,42 @@ class LibraryStore(context: Context) {
         rootDir.mkdirs()
         manifestsDir.mkdirs()
         iconsDir.mkdirs()
-        val loadedRecords = loadIndex()
-        val repairedRecords = repairMetadataFromManifests(loadedRecords)
+
+        // Startup is deliberately index-first. These two JSON files are tiny compared with the
+        // chunk vault, so the first frame can render without reading every manifest/chunk.
+        val loadedRecords = sortRecords(loadIndex())
         val loadedProjects = loadProjects()
-        val repairedProjects = repairProjects(loadedProjects, repairedRecords)
+        val fastProjects = repairProjects(loadedProjects, loadedRecords)
 
-        _projects = MutableStateFlow(repairedProjects)
-        _records = MutableStateFlow(sortRecords(repairedRecords))
-        _stats = MutableStateFlow(calculateStats(_records.value))
+        _projects = MutableStateFlow(fastProjects)
+        _records = MutableStateFlow(loadedRecords)
+        _stats = MutableStateFlow(loadCachedStats(loadedRecords))
 
-        if (repairedRecords != loadedRecords) runCatching { saveIndex(_records.value) }
-        if (repairedProjects != loadedProjects) runCatching { saveProjects(repairedProjects) }
+        maintenanceScope.launch {
+            if (fastProjects != loadedProjects) runCatching { saveProjects(fastProjects) }
+
+            // Manifest metadata repair remains authoritative, but it no longer blocks app launch.
+            val snapshot = _records.value
+            val repairedSnapshot = repairMetadataFromManifests(snapshot)
+            if (repairedSnapshot != snapshot) {
+                val repairs = repairedSnapshot.associateBy { it.id }
+                mutex.withLock {
+                    val live = _records.value
+                    val merged = sortRecords(live.map { record ->
+                        repairs[record.id]?.let { repair ->
+                            if (record.sizeBytes != repair.sizeBytes || record.chunkCount != repair.chunkCount) {
+                                record.copy(sizeBytes = repair.sizeBytes, chunkCount = repair.chunkCount)
+                            } else record
+                        } ?: record
+                    })
+                    if (merged != live) {
+                        saveIndex(merged)
+                        _records.value = merged
+                    }
+                }
+            }
+            scheduleStatsRefresh()
+        }
     }
 
     suspend fun importBase(uri: Uri, projectName: String? = null): ImportResult = withContext(Dispatchers.IO) {
@@ -166,7 +199,6 @@ class LibraryStore(context: Context) {
             saveProjects(updatedProjects)
             _projects.value = updatedProjects
             _records.value = updatedRecords
-            _stats.value = calculateStats(updatedRecords)
 
             // Icon caching is deliberately non-fatal: exact APK storage remains authoritative.
             runCatching {
@@ -177,10 +209,10 @@ class LibraryStore(context: Context) {
                     updatedRecords = sortRecords(updatedRecords.map { if (it.id == id) record else it })
                     saveIndex(updatedRecords)
                     _records.value = updatedRecords
-                    _stats.value = calculateStats(updatedRecords)
                 }
             }
 
+            scheduleStatsRefresh()
             return ImportResult(
                 record = record,
                 reusedBytes = max(0L, record.sizeBytes - record.newBytesAdded),
@@ -188,6 +220,7 @@ class LibraryStore(context: Context) {
         } catch (t: Throwable) {
             createdRecordId?.takeIf { id -> _records.value.none { it.id == id } }?.let { iconFile(it).delete() }
             garbageCollectInternal(_records.value)
+            scheduleStatsRefresh()
             throw t
         } finally {
             tempFile.delete()
@@ -249,8 +282,8 @@ class LibraryStore(context: Context) {
                 })
                 saveIndex(updated)
                 _records.value = updated
-                _stats.value = calculateStats(updated)
             }
+            scheduleStatsRefresh()
             if (unchanged) IconRegenerationOutcome.UNCHANGED else IconRegenerationOutcome.UPDATED
         } catch (_: Throwable) {
             IconRegenerationOutcome.FAILED
@@ -260,6 +293,8 @@ class LibraryStore(context: Context) {
     }
 
     suspend fun regenerateAllIcons(): IconRegenerationSummary = withContext(Dispatchers.IO) {
+        // Deliberately sequential: at most one full reconstructed APK exists at a time. Icon decode
+        // and UI image loading are parallelized elsewhere without multiplying temporary disk usage.
         val ids = _records.value.map { it.id }
         var updated = 0
         var unchanged = 0
@@ -285,8 +320,8 @@ class LibraryStore(context: Context) {
             saveIndex(updated)
             _records.value = updated
             garbageCollectInternal(updated)
-            _stats.value = calculateStats(updated)
         }
+        scheduleStatsRefresh()
     }
 
     suspend fun deleteProject(projectId: String) = withContext(Dispatchers.IO) {
@@ -304,12 +339,13 @@ class LibraryStore(context: Context) {
             _records.value = remainingRecords
             _projects.value = remainingProjects
             garbageCollectInternal(remainingRecords)
-            _stats.value = calculateStats(remainingRecords)
         }
+        scheduleStatsRefresh()
     }
 
     suspend fun clearVault() = withContext(Dispatchers.IO) {
         mutex.withLock {
+            statsGeneration.incrementAndGet()
             rootDir.deleteRecursively()
             rootDir.mkdirs()
             manifestsDir.mkdirs()
@@ -367,7 +403,7 @@ class LibraryStore(context: Context) {
                 }
                 _records.value = sortRecords(repaired)
                 saveIndex(_records.value)
-                _stats.value = calculateStats(_records.value)
+                scheduleStatsRefresh()
             }
         }
     }
@@ -480,6 +516,52 @@ class LibraryStore(context: Context) {
                 for (index in 0 until array.length()) add(array.getJSONObject(index).toProject())
             }
         }.getOrDefault(emptyList())
+    }
+
+    private fun scheduleStatsRefresh() {
+        val generation = statsGeneration.incrementAndGet()
+        maintenanceScope.launch {
+            statsRefreshMutex.withLock {
+                val snapshot = _records.value
+                val computed = calculateStats(snapshot)
+                if (generation == statsGeneration.get()) {
+                    _stats.value = computed
+                    runCatching { saveCachedStats(computed) }
+                }
+            }
+        }
+    }
+
+    private fun loadCachedStats(records: List<ApkRecord>): VaultStats {
+        val logical = records.sumOf { it.sizeBytes }
+        val revisions = records.count { !it.isBase }
+        val cachedPhysical = runCatching {
+            if (!statsFile.isFile) 0L else JSONObject(statsFile.readText()).optLong("physicalBytes", 0L)
+        }.getOrDefault(0L)
+        val saved = max(0L, logical - cachedPhysical)
+        return VaultStats(
+            logicalBytes = logical,
+            physicalBytes = cachedPhysical,
+            savedBytes = saved,
+            savedPercent = if (logical == 0L) 0.0 else saved.toDouble() / logical.toDouble() * 100.0,
+            revisionCount = revisions,
+        )
+    }
+
+    private fun saveCachedStats(stats: VaultStats) {
+        val temp = File(rootDir, ".stats.json.tmp")
+        val json = JSONObject()
+            .put("physicalBytes", stats.physicalBytes)
+            .put("logicalBytes", stats.logicalBytes)
+            .put("savedBytes", stats.savedBytes)
+            .put("savedPercent", stats.savedPercent)
+            .put("revisionCount", stats.revisionCount)
+            .put("updatedAtEpochMs", System.currentTimeMillis())
+        FileOutputStream(temp).use { output ->
+            output.write(json.toString().toByteArray(Charsets.UTF_8))
+            output.fd.sync()
+        }
+        atomicReplace(temp, statsFile)
     }
 
     private fun garbageCollectInternal(records: List<ApkRecord>) {
