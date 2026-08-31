@@ -46,9 +46,9 @@ kotlin {
 }
 
 dependencies {
-    // Compose 1.12+ requires compileSdk 37 / AGP 9. APKbox intentionally targets Android 16 (API 36),
-    // so stay on the final Compose 1.11 stable BOM line for API-36 tooling compatibility.
-    val composeBom = platform("androidx.compose:compose-bom:2026.07.01")
+    // Verified stable BOM published for the Android 16 / API 36 generation.
+    // Compose 1.12+ moves to compileSdk 37 / AGP 9, so APKbox deliberately stays below it.
+    val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
     implementation(composeBom)
 
     implementation("androidx.core:core-ktx:1.17.0")
