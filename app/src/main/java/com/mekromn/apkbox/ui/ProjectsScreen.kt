@@ -1,6 +1,7 @@
 package com.mekromn.apkbox.ui
 
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.VaultStats
@@ -64,6 +66,7 @@ fun ProjectsScreen(
     onBackupVault: () -> Unit,
     onRestoreVault: () -> Unit,
 ) {
+    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -87,6 +90,19 @@ fun ProjectsScreen(
                                 Icon(Icons.Rounded.MoreVert, contentDescription = "Vault options")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Free temporary install space") },
+                                    onClick = {
+                                        menuOpen = false
+                                        val result = TempStorageManager.cleanupAll(context)
+                                        val detail = buildString {
+                                            append("Freed ${Formatter.formatFileSize(context, result.bytesDeleted)}")
+                                            if (result.filesDeleted > 0) append(" · ${result.filesDeleted} scratch file${if (result.filesDeleted == 1) "" else "s"}")
+                                            if (result.installerSessionsAbandoned > 0) append(" · ${result.installerSessionsAbandoned} staged install${if (result.installerSessionsAbandoned == 1) "" else "s"} cancelled")
+                                        }
+                                        Toast.makeText(context, detail, Toast.LENGTH_LONG).show()
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Master backup") },
                                     onClick = { menuOpen = false; onBackupVault() },
@@ -172,7 +188,7 @@ fun ProjectsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    "${projectRecords.size} build${if (projectRecords.size == 1) "" else "s"} · ${Formatter.formatFileSize(LocalContext.current, logical)} full-copy size",
+                                    "${projectRecords.size} build${if (projectRecords.size == 1) "" else "s"} · ${Formatter.formatFileSize(context, logical)} full-copy size",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
