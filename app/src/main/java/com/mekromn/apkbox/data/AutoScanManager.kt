@@ -282,7 +282,6 @@ class AutoScanManager(
             return Event(file.name, project.id, EventStatus.FAILED, "File disappeared before import.")
         }
 
-        // Cheap size prefilter + exact SHA-256 only when a stored build could match.
         val projectRecords = libraryStore.records.value.filter { it.projectId == project.id }
         val alreadyStored = StoredApkMatcher.findMatches(listOf(file), projectRecords)[file.absolutePath]
         if (alreadyStored != null) {
@@ -401,17 +400,16 @@ class AutoScanManager(
         }
         if (observer != null) return
 
+        @Suppress("DEPRECATION")
         observer = object : FileObserver(
-            downloadsRoot,
-            CLOSE_WRITE or MOVED_TO or CREATE,
+            downloadsRoot.absolutePath,
+            FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.CREATE,
         ) {
             override fun onEvent(event: Int, path: String?) {
                 val name = path ?: return
                 if (!name.endsWith(".apk", ignoreCase = true)) return
                 if (File(downloadsRoot, name).canonicalPath.startsWith(apkboxDownloads.canonicalPath)) return
                 scope.launch {
-                    // Some downloaders emit CREATE before their final close/rename. Debounce and let
-                    // the normal stability check make the final decision.
                     delay(STABLE_FILE_AGE_MS)
                     runCatching { scanNow("Downloads watcher") }
                 }
@@ -493,16 +491,18 @@ class AutoScanManager(
         val events = buildList {
             for (index in 0 until eventsArray.length()) {
                 val item = eventsArray.getJSONObject(index)
-                val status = runCatching { EventStatus.valueOf(item.optString("status")) }.getOrNull() ?: continue
-                add(
-                    Event(
-                        fileName = item.optString("fileName", "APK"),
-                        projectId = if (item.isNull("projectId")) null else item.optString("projectId"),
-                        status = status,
-                        detail = item.optString("detail"),
-                        atEpochMs = item.optLong("atEpochMs", 0L),
+                val status = runCatching { EventStatus.valueOf(item.optString("status")) }.getOrNull()
+                if (status != null) {
+                    add(
+                        Event(
+                            fileName = item.optString("fileName", "APK"),
+                            projectId = if (item.isNull("projectId")) null else item.optString("projectId"),
+                            status = status,
+                            detail = item.optString("detail"),
+                            atEpochMs = item.optLong("atEpochMs", 0L),
+                        )
                     )
-                )
+                }
             }
         }.take(MAX_RECENT_EVENTS)
         return Triple(enabled, rules, events)
