@@ -7,6 +7,7 @@ data class ChunkRef(
 
 data class ApkRecord(
     val id: String,
+    val displayName: String,
     val label: String,
     val packageName: String,
     val versionName: String,
@@ -31,4 +32,16 @@ data class VaultStats(
 data class ImportResult(
     val record: ApkRecord,
     val reusedBytes: Long,
+)
+
+enum class ReplaceReason {
+    DOWNGRADE,
+    SIGNATURE_MISMATCH,
+}
+
+data class ReplaceRequest(
+    val record: ApkRecord,
+    val installedVersionName: String?,
+    val installedVersionCode: Long,
+    val reason: ReplaceReason,
 )
