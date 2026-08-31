@@ -31,6 +31,7 @@ import com.mekromn.apkbox.ui.ApkBoxScreen
 import com.mekromn.apkbox.ui.ApkFilePickerScreen
 import com.mekromn.apkbox.ui.ApkPickerMode
 import com.mekromn.apkbox.ui.ProjectsScreen
+import com.mekromn.apkbox.ui.SharedApkScreen
 import com.mekromn.apkbox.ui.theme.APKboxTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
     private val selectedProjectId = MutableStateFlow<String?>(null)
     private val projectsOverviewRequested = MutableStateFlow(false)
     private val directFileAccess = MutableStateFlow(false)
+    private val pendingSharedUris = MutableStateFlow<List<Uri>>(emptyList())
 
     private var installWaitingForPermission: ApkRecord? = null
     private var installWaitingForRemoval: ApkRecord? = null
@@ -88,6 +90,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         directFileAccess.value = hasDirectFileAccess()
+        captureSharedIntent(intent)
 
         setContent {
             APKboxTheme {
@@ -102,6 +105,7 @@ class MainActivity : ComponentActivity() {
                 val currentProjectId = selectedProjectId.collectAsStateWithLifecycle().value
                 val overviewRequested = projectsOverviewRequested.collectAsStateWithLifecycle().value
                 val hasFileAccess = directFileAccess.collectAsStateWithLifecycle().value
+                val sharedUris = pendingSharedUris.collectAsStateWithLifecycle().value
 
                 LaunchedEffect(projects, currentProjectId, overviewRequested) {
                     if (currentProjectId != null && projects.none { it.id == currentProjectId }) {
@@ -122,83 +126,103 @@ class MainActivity : ComponentActivity() {
                     if (uris.isNotEmpty() && projectId != null) importRevisions(projectId, uris)
                 }
 
-                if (currentPickerMode != null) {
-                    ApkFilePickerScreen(
-                        mode = currentPickerMode,
-                        initialDirectory = rememberedPickerDirectory(),
-                        hasDirectFileAccess = hasFileAccess,
-                        storedRecords = records,
-                        onRequestFileAccess = ::requestDirectFileAccess,
-                        onDismiss = {
-                            pickerMode.value = null
-                            pickerProjectId.value = null
-                        },
-                        onPicked = { files ->
-                            if (files.isNotEmpty()) {
-                                rememberPickerDirectory(files.first().parentFile)
-                                val projectId = currentPickerProjectId
-                                pickerMode.value = null
-                                pickerProjectId.value = null
-                                val uris = files.map(::uriForFile)
-                                when (currentPickerMode) {
-                                    ApkPickerMode.BASE -> importBase(uris.first())
-                                    ApkPickerMode.REVISIONS -> if (projectId != null) importRevisions(projectId, uris)
-                                }
-                            }
-                        },
-                        onUseSystemPicker = {
-                            pickerMode.value = null
-                            when (currentPickerMode) {
-                                ApkPickerMode.BASE -> basePicker.launch(apkMimeTypes())
-                                ApkPickerMode.REVISIONS -> revisionPicker.launch(apkMimeTypes())
-                            }
-                        },
-                    )
-                } else {
-                    val selectedProject = projects.firstOrNull { it.id == currentProjectId }
-                    if (selectedProject == null) {
-                        ProjectsScreen(
+                when {
+                    sharedUris.isNotEmpty() -> {
+                        SharedApkScreen(
+                            uris = sharedUris,
                             projects = projects,
                             records = records,
-                            stats = stats,
                             busy = isBusy,
-                            onOpenProject = ::openProject,
-                            onNewProject = {
+                            onDismiss = { pendingSharedUris.value = emptyList() },
+                            onAddToProject = ::importSharedToProject,
+                            onCreateProject = ::createProjectFromShared,
+                        )
+                    }
+                    currentPickerMode != null -> {
+                        ApkFilePickerScreen(
+                            mode = currentPickerMode,
+                            initialDirectory = rememberedPickerDirectory(),
+                            hasDirectFileAccess = hasFileAccess,
+                            storedRecords = records,
+                            onRequestFileAccess = ::requestDirectFileAccess,
+                            onDismiss = {
+                                pickerMode.value = null
                                 pickerProjectId.value = null
-                                pickerMode.value = ApkPickerMode.BASE
                             },
-                            onBackupVault = ::backupVault,
-                            onRestoreVault = ::restoreVault,
+                            onPicked = { files ->
+                                if (files.isNotEmpty()) {
+                                    rememberPickerDirectory(files.first().parentFile)
+                                    val projectId = currentPickerProjectId
+                                    pickerMode.value = null
+                                    pickerProjectId.value = null
+                                    val uris = files.map(::uriForFile)
+                                    when (currentPickerMode) {
+                                        ApkPickerMode.BASE -> importBase(uris.first())
+                                        ApkPickerMode.REVISIONS -> if (projectId != null) importRevisions(projectId, uris)
+                                    }
+                                }
+                            },
+                            onUseSystemPicker = {
+                                pickerMode.value = null
+                                when (currentPickerMode) {
+                                    ApkPickerMode.BASE -> basePicker.launch(apkMimeTypes())
+                                    ApkPickerMode.REVISIONS -> revisionPicker.launch(apkMimeTypes())
+                                }
+                            },
                         )
-                    } else {
-                        ApkBoxScreen(
-                            project = selectedProject,
-                            records = records.filter { it.projectId == selectedProject.id },
-                            globalStats = stats,
-                            busy = isBusy,
-                            message = currentMessage,
-                            replaceRequest = currentReplaceRequest,
-                            onMessageShown = { message.value = null },
-                            onBackToProjects = {
-                                projectsOverviewRequested.value = true
-                                selectedProjectId.value = null
-                            },
-                            onAddRevision = {
-                                pickerProjectId.value = selectedProject.id
-                                pickerMode.value = ApkPickerMode.REVISIONS
-                            },
-                            onInstall = ::requestInstall,
-                            onExport = ::exportRecord,
-                            onShare = ::shareRecord,
-                            onDelete = ::deleteRevision,
-                            onDeleteProject = { deleteProject(selectedProject) },
-                            onConfirmReplace = ::confirmReplacement,
-                            onCancelReplace = { replaceRequest.value = null },
-                        )
+                    }
+                    else -> {
+                        val selectedProject = projects.firstOrNull { it.id == currentProjectId }
+                        if (selectedProject == null) {
+                            ProjectsScreen(
+                                projects = projects,
+                                records = records,
+                                stats = stats,
+                                busy = isBusy,
+                                onOpenProject = ::openProject,
+                                onNewProject = {
+                                    pickerProjectId.value = null
+                                    pickerMode.value = ApkPickerMode.BASE
+                                },
+                                onBackupVault = ::backupVault,
+                                onRestoreVault = ::restoreVault,
+                            )
+                        } else {
+                            ApkBoxScreen(
+                                project = selectedProject,
+                                records = records.filter { it.projectId == selectedProject.id },
+                                globalStats = stats,
+                                busy = isBusy,
+                                message = currentMessage,
+                                replaceRequest = currentReplaceRequest,
+                                onMessageShown = { message.value = null },
+                                onBackToProjects = {
+                                    projectsOverviewRequested.value = true
+                                    selectedProjectId.value = null
+                                },
+                                onAddRevision = {
+                                    pickerProjectId.value = selectedProject.id
+                                    pickerMode.value = ApkPickerMode.REVISIONS
+                                },
+                                onInstall = ::requestInstall,
+                                onExport = ::exportRecord,
+                                onShare = ::shareRecord,
+                                onDelete = ::deleteRevision,
+                                onDeleteProject = { deleteProject(selectedProject) },
+                                onConfirmReplace = ::confirmReplacement,
+                                onCancelReplace = { replaceRequest.value = null },
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureSharedIntent(intent)
     }
 
     override fun onResume() {
@@ -211,6 +235,37 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun captureSharedIntent(source: Intent?) {
+        if (source == null) return
+        val uris = when (source.action) {
+            Intent.ACTION_SEND -> sharedSingleUri(source)?.let(::listOf).orEmpty()
+            Intent.ACTION_SEND_MULTIPLE -> sharedMultipleUris(source)
+            else -> emptyList()
+        }.filter { it.scheme == "content" || it.scheme == "file" }.distinct()
+
+        if (uris.isNotEmpty()) {
+            pickerMode.value = null
+            pickerProjectId.value = null
+            pendingSharedUris.value = uris
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedSingleUri(source: Intent): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            source.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            source.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun sharedMultipleUris(source: Intent): List<Uri> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            source.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+        } else {
+            source.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+        }
 
     private fun openProject(project: ApkProject) {
         projectsOverviewRequested.value = false
@@ -269,32 +324,76 @@ class MainActivity : ComponentActivity() {
 
     private fun importRevisions(projectId: String, uris: List<Uri>) {
         runBusyTask {
-            var added = 0
+            importRevisionBatch(projectId, uris)
+        }
+    }
+
+    private fun importSharedToProject(project: ApkProject, uris: List<Uri>) {
+        runBusyTask {
+            val summary = importRevisionBatch(project.id, uris)
+            pendingSharedUris.value = emptyList()
+            projectsOverviewRequested.value = false
+            selectedProjectId.value = project.id
+            summary
+        }
+    }
+
+    private fun createProjectFromShared(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        runBusyTask {
+            val baseResult = libraryStore.importBase(uris.first())
+            val projectId = baseResult.record.projectId
+            var addedRevisions = 0
             var skipped = 0
-            var logicalBytes = 0L
-            var reusedBytes = 0L
             var firstFailure: String? = null
-            for (uri in uris) {
+
+            for (uri in uris.drop(1)) {
                 runCatching { libraryStore.importRevision(projectId, uri) }
-                    .onSuccess { result ->
-                        added++
-                        logicalBytes += result.record.sizeBytes
-                        reusedBytes += result.reusedBytes
-                    }
+                    .onSuccess { addedRevisions++ }
                     .onFailure { failure ->
                         skipped++
                         if (firstFailure == null) firstFailure = failure.message
                     }
             }
-            if (added == 0) error(firstFailure ?: "No revisions were imported.")
-            val reusedPercent = if (logicalBytes == 0L) 0L
-            else (reusedBytes * 100L / logicalBytes).coerceIn(0L, 100L)
+
+            pendingSharedUris.value = emptyList()
+            projectsOverviewRequested.value = false
+            selectedProjectId.value = projectId
             buildString {
-                append("Saved $added revision")
-                if (added != 1) append('s')
-                append(" · $reusedPercent% reused across vault")
+                append("Project created · ${baseResult.record.label}")
+                if (addedRevisions > 0) append(" · $addedRevisions revision${if (addedRevisions == 1) "" else "s"} added")
                 if (skipped > 0) append(" · $skipped skipped")
+                if (skipped > 0 && firstFailure != null) append(" · $firstFailure")
             }
+        }
+    }
+
+    private suspend fun importRevisionBatch(projectId: String, uris: List<Uri>): String {
+        var added = 0
+        var skipped = 0
+        var logicalBytes = 0L
+        var reusedBytes = 0L
+        var firstFailure: String? = null
+        for (uri in uris) {
+            runCatching { libraryStore.importRevision(projectId, uri) }
+                .onSuccess { result ->
+                    added++
+                    logicalBytes += result.record.sizeBytes
+                    reusedBytes += result.reusedBytes
+                }
+                .onFailure { failure ->
+                    skipped++
+                    if (firstFailure == null) firstFailure = failure.message
+                }
+        }
+        if (added == 0) error(firstFailure ?: "No revisions were imported.")
+        val reusedPercent = if (logicalBytes == 0L) 0L
+        else (reusedBytes * 100L / logicalBytes).coerceIn(0L, 100L)
+        return buildString {
+            append("Saved $added revision")
+            if (added != 1) append('s')
+            append(" · $reusedPercent% reused across vault")
+            if (skipped > 0) append(" · $skipped skipped")
         }
     }
 
@@ -380,7 +479,7 @@ class MainActivity : ComponentActivity() {
     private fun backupVault() {
         runBusyTask {
             val location = writeBackupToDownloads()
-            "Master backup verified and saved · $location"
+            "Master backup saved · $location"
         }
     }
 
@@ -430,7 +529,6 @@ class MainActivity : ComponentActivity() {
                     "Restored ${summary.projects} project${if (summary.projects == 1) "" else "s"} · ${summary.records} builds · every APK SHA-256 verified",
                     Toast.LENGTH_LONG,
                 ).show()
-                // A fresh Activity instance creates a fresh LibraryStore over the restored files.
                 recreate()
             } catch (t: Throwable) {
                 message.value = t.message?.takeIf { it.isNotBlank() }
