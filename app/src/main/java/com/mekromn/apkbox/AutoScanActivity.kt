@@ -12,21 +12,25 @@ import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mekromn.apkbox.ui.AutoScanScreen
 import com.mekromn.apkbox.ui.theme.APKboxTheme
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class AutoScanActivity : ComponentActivity() {
     private val libraryStore by lazy { ApkBoxServices.libraryStore(applicationContext) }
     private val scanner by lazy { ApkBoxServices.autoScanner(applicationContext) }
+    private val directFileAccess = MutableStateFlow(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        directFileAccess.value = hasDirectFileAccess()
         setContent {
             APKboxTheme {
                 val projects = libraryStore.projects.collectAsStateWithLifecycle().value
+                val hasFileAccess = directFileAccess.collectAsStateWithLifecycle().value
                 AutoScanScreen(
                     manager = scanner,
                     projects = projects,
-                    hasDirectFileAccess = hasDirectFileAccess(),
+                    hasDirectFileAccess = hasFileAccess,
                     onRequestFileAccess = ::requestDirectFileAccess,
                     onDismiss = ::finish,
                 )
@@ -36,6 +40,7 @@ class AutoScanActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        directFileAccess.value = hasDirectFileAccess()
         scanner.reloadFromDisk()
         scanner.scanAsync("Auto Scanner screen resume")
     }
