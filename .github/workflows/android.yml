@@ -46,8 +46,8 @@ jobs:
           path: ~/.android/debug.keystore
           key: apkbox-development-signing-v1
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Test and build debug APK
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
       - name: Upload APKbox debug APK
         uses: actions/upload-artifact@v4
