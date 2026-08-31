@@ -1,5 +1,6 @@
 package com.mekromn.apkbox.ui
 
+import android.content.Intent
 import android.text.format.Formatter
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mekromn.apkbox.AutoScanActivity
 import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
@@ -92,6 +94,13 @@ fun ProjectsScreen(
                                 Icon(Icons.Rounded.MoreVert, contentDescription = "Vault options")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Auto Scanner") },
+                                    onClick = {
+                                        menuOpen = false
+                                        context.startActivity(Intent(context, AutoScanActivity::class.java))
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("APK cleanup") },
                                     onClick = { menuOpen = false; onCleanupApks() },
