@@ -6,6 +6,7 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Rect
 import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -57,16 +58,22 @@ internal object ApkInspector {
 
         val size = sizePx.coerceIn(96, 512)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val old = drawable.bounds
-        drawable.setBounds(0, 0, size, size)
-        drawable.draw(canvas)
-        drawable.setBounds(old.left, old.top, old.right, old.bottom)
+        try {
+            val canvas = Canvas(bitmap)
+            val old = Rect(drawable.bounds)
+            try {
+                drawable.setBounds(0, 0, size, size)
+                drawable.draw(canvas)
+            } finally {
+                drawable.setBounds(old.left, old.top, old.right, old.bottom)
+            }
 
-        ByteArrayOutputStream().use { output ->
-            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            ByteArrayOutputStream().use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                output.toByteArray()
+            }
+        } finally {
             bitmap.recycle()
-            output.toByteArray()
         }
     }.getOrNull()
 
