@@ -2,6 +2,7 @@ package com.mekromn.apkbox.data
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ChunkRef
 import com.mekromn.apkbox.model.ImportResult
@@ -67,6 +68,7 @@ class LibraryStore(context: Context) {
                 error("Choose a base APK first.")
             }
 
+            val sourceDisplayName = documentDisplayName(uri)
             val tempFile = File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
             try {
                 appContext.contentResolver.openInputStream(uri)?.use { input ->
@@ -90,6 +92,7 @@ class LibraryStore(context: Context) {
                 val id = UUID.randomUUID().toString()
                 val record = ApkRecord(
                     id = id,
+                    displayName = sourceDisplayName ?: archive.label,
                     label = archive.label,
                     packageName = archive.packageName,
                     versionName = archive.versionName,
@@ -272,6 +275,19 @@ class LibraryStore(context: Context) {
         )
     }
 
+    private fun documentDisplayName(uri: Uri): String? = runCatching {
+        appContext.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+        }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
     private fun manifestFile(recordId: String) = File(manifestsDir, "$recordId.apkm")
 
     private fun atomicReplace(temp: File, target: File) {
@@ -285,6 +301,7 @@ class LibraryStore(context: Context) {
 
     private fun ApkRecord.toJson(): JSONObject = JSONObject()
         .put("id", id)
+        .put("displayName", displayName)
         .put("label", label)
         .put("packageName", packageName)
         .put("versionName", versionName)
@@ -299,6 +316,7 @@ class LibraryStore(context: Context) {
 
     private fun JSONObject.toRecord(): ApkRecord = ApkRecord(
         id = getString("id"),
+        displayName = optString("displayName").takeIf { it.isNotBlank() } ?: getString("label"),
         label = getString("label"),
         packageName = getString("packageName"),
         versionName = getString("versionName"),
