@@ -13,6 +13,7 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.mekromn.apkbox.R
+import com.mekromn.apkbox.data.TempStorageManager
 
 class InstallResultReceiver : BroadcastReceiver() {
     companion object {
@@ -27,6 +28,7 @@ class InstallResultReceiver : BroadcastReceiver() {
             PackageInstaller.EXTRA_STATUS,
             PackageInstaller.STATUS_FAILURE,
         )
+        val sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
         val packageName = intent.getStringExtra(EXTRA_TARGET_PACKAGE).orEmpty()
         val label = intent.getStringExtra(EXTRA_TARGET_LABEL).orEmpty().ifBlank { packageName }
         val version = intent.getStringExtra(EXTRA_TARGET_VERSION).orEmpty()
@@ -44,6 +46,7 @@ class InstallResultReceiver : BroadcastReceiver() {
             }
 
             PackageInstaller.STATUS_SUCCESS -> {
+                cleanupTerminalSession(context, sessionId)
                 val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
                 if (launchIntent != null) {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
@@ -55,11 +58,21 @@ class InstallResultReceiver : BroadcastReceiver() {
             }
 
             else -> {
+                cleanupTerminalSession(context, sessionId)
                 val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
                     ?: "Android rejected the installation."
                 notifyMessage(context, "Install failed", message)
             }
         }
+    }
+
+    private fun cleanupTerminalSession(context: Context, sessionId: Int) {
+        if (sessionId >= 0) {
+            // Finished sessions are normally removed by Android immediately. If one still exists,
+            // explicitly abandon it so staged APK bytes are not retained longer than necessary.
+            runCatching { context.packageManager.packageInstaller.abandonSession(sessionId) }
+        }
+        runCatching { TempStorageManager.cleanupRoutine(context) }
     }
 
     private fun notifyInstalled(context: Context, label: String, version: String, launchIntent: Intent) {
