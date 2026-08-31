@@ -63,6 +63,7 @@ fun ProjectsScreen(
     busy: Boolean,
     onOpenProject: (ApkProject) -> Unit,
     onNewProject: () -> Unit,
+    onCleanupApks: () -> Unit,
     onBackupVault: () -> Unit,
     onRestoreVault: () -> Unit,
 ) {
@@ -90,6 +91,10 @@ fun ProjectsScreen(
                                 Icon(Icons.Rounded.MoreVert, contentDescription = "Vault options")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("APK cleanup") },
+                                    onClick = { menuOpen = false; onCleanupApks() },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Free temporary install space") },
                                     onClick = {
