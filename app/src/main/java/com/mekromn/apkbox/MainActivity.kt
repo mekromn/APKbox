@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -20,6 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
+import com.mekromn.apkbox.data.VaultBackupManager
 import com.mekromn.apkbox.install.ApkInstaller
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
@@ -36,6 +38,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -45,6 +50,7 @@ class MainActivity : ComponentActivity() {
 
     private val libraryStore by lazy { LibraryStore(applicationContext) }
     private val apkInstaller by lazy { ApkInstaller(applicationContext, libraryStore) }
+    private val backupManager by lazy { VaultBackupManager(applicationContext) }
     private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
 
     private val busy = MutableStateFlow(false)
@@ -70,6 +76,12 @@ class MainActivity : ComponentActivity() {
         } else {
             message.value = "Replacement cancelled · the installed app was left unchanged"
         }
+    }
+
+    private val backupRestoreLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) restoreBackupUri(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -343,7 +355,9 @@ class MainActivity : ComponentActivity() {
             busy.value = true
             try {
                 val shareDir = File(cacheDir, "share").apply { mkdirs() }
-                shareDir.listFiles()?.forEach { if (System.currentTimeMillis() - it.lastModified() > 60 * 60 * 1000L) it.delete() }
+                shareDir.listFiles()?.forEach {
+                    if (System.currentTimeMillis() - it.lastModified() > 60 * 60 * 1000L) it.delete()
+                }
                 val target = uniqueFile(shareDir, sanitizedApkName(record.displayName))
                 withContext(Dispatchers.IO) {
                     FileOutputStream(target).use { libraryStore.streamApk(record, it) }
@@ -364,11 +378,67 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun backupVault() {
-        message.value = "Master backup engine is being enabled in this build."
+        runBusyTask {
+            val location = writeBackupToDownloads()
+            "Master backup verified and saved · $location"
+        }
+    }
+
+    private suspend fun writeBackupToDownloads(): String = withContext(Dispatchers.IO) {
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val fileName = "APKbox-master-$stamp.apkboxbackup"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/APKbox")
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: error("Android could not create the master backup file.")
+            try {
+                contentResolver.openOutputStream(uri, "w")?.use { output ->
+                    backupManager.writeBackup(output)
+                } ?: error("Android could not open the master backup file.")
+            } catch (t: Throwable) {
+                runCatching { contentResolver.delete(uri, null, null) }
+                throw t
+            }
+            "Downloads/APKbox/$fileName"
+        } else {
+            val folder = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "APKbox")
+            folder.mkdirs()
+            val target = uniqueNamedFile(folder, fileName)
+            FileOutputStream(target).use { backupManager.writeBackup(it) }
+            target.absolutePath
+        }
     }
 
     private fun restoreVault() {
-        message.value = "Master restore validation is being enabled in this build."
+        if (busy.value) return
+        backupRestoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "application/x-zip-compressed"))
+    }
+
+    private fun restoreBackupUri(uri: Uri) {
+        if (busy.value) return
+        lifecycleScope.launch {
+            busy.value = true
+            try {
+                val summary = withContext(Dispatchers.IO) { backupManager.restoreBackup(uri) }
+                Toast.makeText(
+                    this@MainActivity,
+                    "Restored ${summary.projects} project${if (summary.projects == 1) "" else "s"} · ${summary.records} builds · every APK SHA-256 verified",
+                    Toast.LENGTH_LONG,
+                ).show()
+                // A fresh Activity instance creates a fresh LibraryStore over the restored files.
+                recreate()
+            } catch (t: Throwable) {
+                message.value = t.message?.takeIf { it.isNotBlank() }
+                    ?: "Master restore failed. The previous vault was kept."
+            } finally {
+                busy.value = false
+            }
+        }
     }
 
     private fun sanitizedApkName(name: String): String {
@@ -383,6 +453,20 @@ class MainActivity : ComponentActivity() {
         var index = 2
         while (target.exists()) {
             target = File(folder, "$base ($index).apk")
+            index++
+        }
+        return target
+    }
+
+    private fun uniqueNamedFile(folder: File, preferredName: String): File {
+        var target = File(folder, preferredName)
+        if (!target.exists()) return target
+        val dot = preferredName.lastIndexOf('.')
+        val base = if (dot > 0) preferredName.substring(0, dot) else preferredName
+        val extension = if (dot > 0) preferredName.substring(dot) else ""
+        var index = 2
+        while (target.exists()) {
+            target = File(folder, "$base ($index)$extension")
             index++
         }
         return target
