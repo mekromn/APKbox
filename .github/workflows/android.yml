@@ -9,6 +9,9 @@ concurrency:
   group: apkbox-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  APKBOX_KEYSTORE: /home/runner/.apkbox-signing/debug.keystore
+
 permissions:
   contents: read
 
@@ -37,14 +40,37 @@ jobs:
       - name: Install Android 16 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      # A fresh GitHub runner would otherwise create a new debug key. Keeping this cache private
-      # to trusted main/workflow_dispatch builds makes APKbox updates install over prior APKbox
-      # builds without committing a signing private key to this public repository.
+      # The signing private key stays only in the Actions cache. This workflow intentionally does
+      # not run for pull_request events, so untrusted PR code never receives the cached key.
       - name: Restore APKbox development signing key
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: apkbox-development-signing-v1
+          path: /home/runner/.apkbox-signing/debug.keystore
+          key: apkbox-development-signing-v2
+
+      - name: Ensure APKbox development signing key
+        shell: bash
+        run: |
+          mkdir -p "$(dirname "$APKBOX_KEYSTORE")"
+          if [ ! -f "$APKBOX_KEYSTORE" ]; then
+            keytool -genkeypair -noprompt \
+              -keystore "$APKBOX_KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=APKbox Development,O=mekromn,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+          fi
+
+      - name: Show APKbox signing certificate
+        shell: bash
+        run: |
+          keytool -list -v \
+            -keystore "$APKBOX_KEYSTORE" \
+            -storepass android \
+            -alias androiddebugkey | grep 'SHA256:'
 
       - name: Test and build debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
