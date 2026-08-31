@@ -93,16 +93,18 @@ class MainActivity : ComponentActivity() {
                         mode = currentPickerMode,
                         initialDirectory = rememberedPickerDirectory(),
                         hasDirectFileAccess = hasFileAccess,
+                        storedRecords = records,
                         onRequestFileAccess = ::requestDirectFileAccess,
                         onDismiss = { pickerMode.value = null },
                         onPicked = { files ->
-                            if (files.isEmpty()) return@ApkFilePickerScreen
-                            rememberPickerDirectory(files.first().parentFile)
-                            pickerMode.value = null
-                            val uris = files.map(::uriForFile)
-                            when (currentPickerMode) {
-                                ApkPickerMode.BASE -> importBase(uris.first())
-                                ApkPickerMode.REVISIONS -> importRevisions(uris)
+                            if (files.isNotEmpty()) {
+                                rememberPickerDirectory(files.first().parentFile)
+                                pickerMode.value = null
+                                val uris = files.map(::uriForFile)
+                                when (currentPickerMode) {
+                                    ApkPickerMode.BASE -> importBase(uris.first())
+                                    ApkPickerMode.REVISIONS -> importRevisions(uris)
+                                }
                             }
                         },
                         onUseSystemPicker = {
