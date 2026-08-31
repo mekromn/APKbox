@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
@@ -52,6 +53,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -154,8 +157,20 @@ fun ApkBoxScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { searchOpen = !searchOpen }) {
-                            Icon(Icons.Rounded.Search, contentDescription = "Search revisions")
+                        IconButton(
+                            onClick = {
+                                if (searchOpen) {
+                                    searchOpen = false
+                                    query = ""
+                                } else {
+                                    searchOpen = true
+                                }
+                            },
+                        ) {
+                            Icon(
+                                if (searchOpen) Icons.Rounded.Close else Icons.Rounded.Search,
+                                contentDescription = if (searchOpen) "Close search" else "Search revisions",
+                            )
                         }
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
@@ -187,17 +202,6 @@ fun ApkBoxScreen(
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 )
-                AnimatedVisibility(searchOpen) {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                        singleLine = true,
-                        shape = RoundedCornerShape(18.dp),
-                        placeholder = { Text("Search filename, version, notes, description, hash") },
-                        leadingIcon = { Icon(Icons.Rounded.Search, null) },
-                    )
-                }
                 AnimatedVisibility(busy) { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             }
         },
@@ -212,7 +216,22 @@ fun ApkBoxScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            item { CompactProjectSummary(records, globalStats, starredOnly) }
+            if (searchOpen) {
+                item(key = "project-search") {
+                    ProjectSearchField(
+                        query = query,
+                        onQueryChange = { query = it },
+                        onClose = {
+                            query = ""
+                            searchOpen = false
+                        },
+                    )
+                }
+            }
+
+            item(key = "project-stats") {
+                ProjectStatsCard(records, globalStats, starredOnly)
+            }
 
             if (base != null) {
                 item { SectionLabel("BASE") }
@@ -431,6 +450,34 @@ fun ApkBoxScreen(
 }
 
 @Composable
+private fun ProjectSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    TextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(24.dp),
+        placeholder = { Text("Search builds") },
+        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+        trailingIcon = {
+            IconButton(onClick = onClose, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Rounded.Close, contentDescription = "Close search")
+            }
+        },
+        colors = TextFieldDefaults.colors(
+            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            focusedIndicatorColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            unfocusedIndicatorColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    )
+}
+
+@Composable
 private fun SectionLabel(text: String) {
     Text(
         text,
@@ -442,29 +489,67 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun CompactProjectSummary(records: List<ApkRecord>, globalStats: VaultStats, starredOnly: Boolean) {
+private fun ProjectStatsCard(records: List<ApkRecord>, globalStats: VaultStats, starredOnly: Boolean) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val logical = records.sumOf { it.sizeBytes }
-    val projectNew = records.sumOf { it.newBytesAdded }
-    val reused = (logical - projectNew).coerceAtLeast(0L)
+    val introduced = records.sumOf { it.newBytesAdded }.coerceAtLeast(0L)
+    val reused = (logical - introduced).coerceAtLeast(0L)
     val reusedPercent = if (logical == 0L) 0.0 else reused.toDouble() / logical * 100.0
-    val percent = NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(reusedPercent)
+    val projectPercent = NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(reusedPercent)
+    val globalPercent = NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(globalStats.savedPercent)
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 1.dp,
     ) {
-        Text(
-            buildString {
-                append("$percent% project reuse · ${records.size} builds · ")
-                append("${Formatter.formatFileSize(context, logical)} full-copy size · ")
-                append("${Formatter.formatFileSize(context, globalStats.physicalBytes)} vault physical")
-                if (starredOnly) append(" · starred filter on")
-            },
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "PROJECT STORAGE",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                ) {
+                    Text(
+                        "$projectPercent% reused",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Spacer(Modifier.size(7.dp))
+            Text(
+                "${records.size} build${if (records.size == 1) "" else "s"} · ${Formatter.formatFileSize(context, logical)} as full APK copies",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                "${Formatter.formatFileSize(context, introduced)} new bytes introduced · ${Formatter.formatFileSize(context, reused)} reused",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Vault ${Formatter.formatFileSize(context, globalStats.physicalBytes)} physical · ${Formatter.formatFileSize(context, globalStats.savedBytes)} saved · $globalPercent%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (starredOnly) {
+                Text(
+                    "Starred-only filter active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
     }
 }
 
@@ -496,11 +581,11 @@ private fun CompactApkRow(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StoredApkIcon(record, Modifier.size(56.dp), record.label)
-            Column(Modifier.weight(1f).padding(start = 12.dp, end = 4.dp)) {
+            Column(Modifier.weight(1f).padding(start = 12.dp, end = 2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         record.displayName,
@@ -572,8 +657,16 @@ private fun CompactApkRow(
                     }
                 }
             }
-            IconButton(enabled = !busy, onClick = onActions) {
-                Icon(Icons.Rounded.MoreVert, contentDescription = "APK actions")
+            IconButton(
+                enabled = !busy,
+                onClick = onActions,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    Icons.Rounded.MoreVert,
+                    contentDescription = "APK actions",
+                    modifier = Modifier.size(22.dp),
+                )
             }
         }
     }
