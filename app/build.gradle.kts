@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val apkboxSigningKeystore = System.getenv("APKBOX_KEYSTORE")
+
 android {
     namespace = "com.mekromn.apkbox"
     compileSdk = 36
@@ -14,6 +16,17 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            if (!apkboxSigningKeystore.isNullOrBlank()) {
+                storeFile = rootProject.file(apkboxSigningKeystore)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
 
     buildTypes {
