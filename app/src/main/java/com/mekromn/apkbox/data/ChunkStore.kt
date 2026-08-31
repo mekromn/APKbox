@@ -14,8 +14,14 @@ internal data class ChunkingResult(
 )
 
 /**
- * A compact content-defined chunk store. Boundaries are based on a Gear-style rolling hash,
- * so inserting bytes in one part of an APK does not shift every subsequent chunk boundary.
+ * Content-defined, vault-wide chunk store.
+ *
+ * Boundaries are based only on file content (Gear-style rolling hash), so insertions or edits in
+ * one part of an APK do not permanently shift later boundaries. Chunks are addressed solely by
+ * SHA-256 under one shared chunks directory. Therefore every ingest checks against the entire
+ * existing vault: the base APK and every revision imported before it. A chunk introduced by
+ * revision A can be reused directly by revisions B, C, or any later build even when that chunk
+ * never existed in the base APK.
  */
 internal class ChunkStore(private val chunksDir: File) {
     companion object {
@@ -52,6 +58,9 @@ internal class ChunkStore(private val chunksDir: File) {
             val bytes = chunkBuffer.toByteArray()
             val hash = MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
             val target = chunkFile(hash)
+
+            // This is deliberately global, not base-relative. Any existing hash came from some
+            // previously stored APK in this vault and is immediately reusable by this revision.
             if (!target.exists()) {
                 target.parentFile?.mkdirs()
                 val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
