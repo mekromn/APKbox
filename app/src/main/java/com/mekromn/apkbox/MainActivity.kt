@@ -21,7 +21,6 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.data.ApkInspector
-import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.data.VaultBackupManager
 import com.mekromn.apkbox.install.ApkInstaller
 import com.mekromn.apkbox.model.ApkProject
@@ -56,7 +55,8 @@ class MainActivity : ComponentActivity() {
         private const val PREF_LAST_PICKER_DIR = "last-picker-dir"
     }
 
-    private val libraryStore by lazy { LibraryStore(applicationContext) }
+    private val libraryStore by lazy { ApkBoxServices.libraryStore(applicationContext) }
+    private val autoScanner by lazy { ApkBoxServices.autoScanner(applicationContext) }
     private val apkInstaller by lazy { ApkInstaller(applicationContext, libraryStore) }
     private val backupManager by lazy { VaultBackupManager(applicationContext) }
     private val preferences by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
@@ -261,6 +261,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         directFileAccess.value = hasDirectFileAccess()
+        if (directFileAccess.value) autoScanner.scanAsync("APKbox resume")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && packageManager.canRequestPackageInstalls()) {
             installWaitingForPermission?.let { record ->
                 installWaitingForPermission = null
@@ -650,6 +651,7 @@ class MainActivity : ComponentActivity() {
             busy.value = true
             try {
                 val summary = withContext(Dispatchers.IO) { backupManager.restoreBackup(uri) }
+                ApkBoxServices.resetVaultServices()
                 Toast.makeText(
                     this@MainActivity,
                     "Restored ${summary.projects} project${if (summary.projects == 1) "" else "s"} · ${summary.records} builds · every APK SHA-256 verified",
