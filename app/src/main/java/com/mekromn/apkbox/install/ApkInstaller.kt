@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
+import android.os.StatFs
 import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
@@ -17,6 +18,8 @@ class ApkInstaller(
 ) {
     companion object {
         private const val STALE_SESSION_MS = 10L * 60L * 1000L
+        private const val SAFETY_RESERVE_BYTES = 256L * 1024L * 1024L
+        private const val MIB = 1024L * 1024L
     }
 
     private val appContext = context.applicationContext
@@ -59,6 +62,15 @@ class ApkInstaller(
         val exactSize = libraryStore.authoritativeSize(record)
         require(exactSize > 0L) { "Stored APK manifest has an invalid size." }
 
+        // Android can briefly need both a full staging copy and the destination package copy.
+        // Keep an additional reserve so APKbox refuses early instead of filling /data mid-install.
+        val availableBytes = runCatching { StatFs(appContext.filesDir.absolutePath).availableBytes }
+            .getOrDefault(Long.MAX_VALUE)
+        val requiredBytes = exactSize * 2L + SAFETY_RESERVE_BYTES
+        check(availableBytes >= requiredBytes) {
+            "Not enough free space to safely stage ${record.displayName}. APKbox needs about ${toMiB(requiredBytes)} MiB free for this ${toMiB(exactSize)} MiB APK, but only ${toMiB(availableBytes)} MiB is available. Free space first; nothing was staged."
+        }
+
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(record.packageName)
             setSize(exactSize)
@@ -100,4 +112,7 @@ class ApkInstaller(
             runCatching { session?.close() }
         }
     }
+
+    private fun toMiB(bytes: Long): Long =
+        if (bytes <= 0L) 0L else (bytes + MIB - 1L) / MIB
 }
