@@ -8,19 +8,21 @@ Instead of storing every APK in full, APKbox stores APKs as content-defined, SHA
 
 1. Pick and remember a **Base APK**.
 2. Import any number of revisions of that same package.
-3. APKbox chunks each APK, compares the chunks against the shared vault, and saves only previously unseen chunk data.
-4. Search/select any stored revision.
-5. APKbox streams the exact reconstructed APK directly into Android's `PackageInstaller`, verifies its SHA-256 while reconstructing, asks for the required system install approval, and attempts to launch the installed app after success.
+3. APKbox chunks each APK and compares every chunk against the **entire shared vault**: the base plus every previously imported revision. Only previously unseen chunk data is saved.
+4. A chunk introduced by revision A can be reused by revisions B, C, or later even if that chunk never existed in the base APK.
+5. Search/select any stored revision.
+6. APKbox streams the exact reconstructed APK directly into Android's `PackageInstaller`, verifies its SHA-256 while reconstructing, asks for the required system install approval, and attempts to launch the installed app after success.
 
 No reconstructed APK has to remain on disk after installation.
 
 ## Storage design
 
 - Content-defined chunking: 64 KiB minimum / ~256 KiB target / 1 MiB maximum.
-- SHA-256 content-addressed chunk files.
+- SHA-256 content-addressed chunk files shared by the **whole vault**, not one base-to-revision patch chain.
+- Every import may reuse chunks from the base and from any earlier revision simultaneously.
 - Exact byte-for-byte APK reconstruction.
 - Per-build manifests contain ordered chunk hashes/sizes and APK metadata.
-- Shared chunks are reused by the base and every revision.
+- Deleting an earlier revision cannot break a later one: shared chunks remain while any surviving manifest references them.
 - Library storage statistics report logical APK bytes, physical vault bytes, and space saved.
 - Revision deletion garbage-collects chunks no longer referenced by any remaining APK.
 
@@ -39,5 +41,7 @@ These restrictions do not affect APK reconstruction or storage savings.
 ## Project status
 
 The first implementation includes the vault engine, base/revision import, exact reconstruction verification, PackageInstaller integration, storage statistics, search, deletion/garbage collection, and a Material 3 / dynamic-color Compose UI.
+
+Regression tests explicitly verify both base-to-revision reuse and **revision-to-revision reuse of data that never existed in the base**.
 
 A GitHub Actions workflow builds a debug APK on every push to `main`.
