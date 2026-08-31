@@ -17,10 +17,14 @@ class ApkInstaller(
     private val appContext = context.applicationContext
 
     suspend fun install(record: ApkRecord) = withContext(Dispatchers.IO) {
+        // Never trust cached/index size metadata here. The ordered manifest is authoritative.
+        val exactSize = libraryStore.authoritativeSize(record)
+        require(exactSize > 0L) { "Stored APK manifest has an invalid size." }
+
         val installer = appContext.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(record.packageName)
-            setSize(record.sizeBytes)
+            setSize(exactSize)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
             }
@@ -32,8 +36,8 @@ class ApkInstaller(
         val sessionId = installer.createSession(params)
         val session = installer.openSession(sessionId)
         try {
-            session.openWrite("base.apk", 0, record.sizeBytes).use { output ->
-                // LibraryStore validates byte count + full original SHA-256 before commit.
+            session.openWrite("base.apk", 0, exactSize).use { output ->
+                // LibraryStore validates manifest byte count + full original SHA-256 before commit.
                 libraryStore.streamApk(record, output)
                 session.fsync(output)
             }
