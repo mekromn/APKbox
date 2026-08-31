@@ -12,10 +12,14 @@ class ApkBoxApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // Cleanup is important, but it must not hold the first frame hostage. PackageInstaller and
-        // cache inspection are independent of rendering the vault index, so do them concurrently.
+        // Cleanup and Auto Scanner catch-up are important, but neither may hold the first frame.
         startupScope.launch {
             runCatching { TempStorageManager.cleanupStartup(this@ApkBoxApplication) }
+            runCatching {
+                val scanner = ApkBoxServices.autoScanner(this@ApkBoxApplication)
+                scanner.reloadFromDisk()
+                scanner.scanNow("APKbox process startup")
+            }
         }
     }
 }
