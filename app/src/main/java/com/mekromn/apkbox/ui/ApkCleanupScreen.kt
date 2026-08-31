@@ -103,6 +103,7 @@ fun ApkCleanupScreen(
     var deleting by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
     var unreadableDirectories by remember { mutableIntStateOf(0) }
+    var unreadableFiles by remember { mutableIntStateOf(0) }
     var directoriesVisited by remember { mutableIntStateOf(0) }
     var refreshKey by remember { mutableIntStateOf(0) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -122,6 +123,7 @@ fun ApkCleanupScreen(
             candidates = result.candidates
             directoriesVisited = result.directoriesVisited
             unreadableDirectories = result.unreadableDirectories
+            unreadableFiles = result.unreadableFiles
             selected = selected.intersect(result.candidates.mapTo(hashSetOf()) { it.path })
         } catch (t: Throwable) {
             scanError = t.message ?: "APK scan failed."
@@ -244,6 +246,7 @@ fun ApkCleanupScreen(
                             safeBytes = safeBytes,
                             directoriesVisited = directoriesVisited,
                             unreadableDirectories = unreadableDirectories,
+                            unreadableFiles = unreadableFiles,
                         )
                     }
                     item {
@@ -319,7 +322,13 @@ fun ApkCleanupScreen(
                         !scanning && visible.isEmpty() -> item {
                             CleanupEmptyMessage(
                                 if (candidates.isEmpty()) "No APK files found" else "No matching APKs",
-                                if (candidates.isEmpty()) "No .apk files were found in accessible shared storage." else "Try another filter or search.",
+                                if (candidates.isEmpty()) {
+                                    if (unreadableDirectories > 0 || unreadableFiles > 0) {
+                                        "No readable .apk files were found. Some storage entries could not be inspected."
+                                    } else {
+                                        "No .apk files were found in accessible shared storage."
+                                    }
+                                } else "Try another filter or search.",
                             )
                         }
                         else -> items(visible, key = { it.path }) { candidate ->
@@ -357,7 +366,7 @@ fun ApkCleanupScreen(
                         )
                     } else {
                         Text(
-                            "$selectedUnsafeCount selected APK${if (selectedUnsafeCount == 1) " is" else "s are"} NOT stored in APKbox. APKbox cannot reconstruct those files after deletion.",
+                            "$selectedUnsafeCount selected APK${if (selectedUnsafeCount == 1) " is" else "s are"} NOT verified as stored in APKbox. APKbox cannot promise those files are reconstructable after deletion.",
                             color = MaterialTheme.colorScheme.error,
                             fontWeight = FontWeight.Bold,
                         )
@@ -431,6 +440,7 @@ private fun CleanupSummaryCard(
     safeBytes: Long,
     directoriesVisited: Int,
     unreadableDirectories: Int,
+    unreadableFiles: Int,
 ) {
     val context = LocalContext.current
     Card(
@@ -459,8 +469,12 @@ private fun CleanupSummaryCard(
             }
             Spacer(Modifier.size(12.dp))
             Text(
-                "$totalCount APK file${if (totalCount == 1) "" else "s"} found · $directoriesVisited folders scanned" +
-                    if (unreadableDirectories > 0) " · $unreadableDirectories inaccessible" else "",
+                buildString {
+                    append("$totalCount APK file${if (totalCount == 1) "" else "s"} found · $directoriesVisited folders scanned")
+                    val unreadableFolderOnly = (unreadableDirectories - unreadableFiles).coerceAtLeast(0)
+                    if (unreadableFolderOnly > 0) append(" · $unreadableFolderOnly inaccessible folder${if (unreadableFolderOnly == 1) "" else "s"}")
+                    if (unreadableFiles > 0) append(" · $unreadableFiles APK read issue${if (unreadableFiles == 1) "" else "s"}")
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
@@ -492,8 +506,11 @@ private fun CleanupCandidateRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = if (candidate.isSafelyStored) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.errorContainer,
+                    color = when {
+                        candidate.isSafelyStored -> MaterialTheme.colorScheme.primaryContainer
+                        candidate.hashReadFailed -> MaterialTheme.colorScheme.tertiaryContainer
+                        else -> MaterialTheme.colorScheme.errorContainer
+                    },
                 ) {
                     Icon(
                         Icons.Rounded.Android,
@@ -522,34 +539,51 @@ private fun CleanupCandidateRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.size(7.dp))
-            if (stored != null) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.CheckCircle, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.size(6.dp))
-                    Text(
-                        buildString {
-                            append("Stored safely")
-                            if (!projectName.isNullOrBlank()) append(" · $projectName")
-                            append(" · ${stored.displayName}")
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+            when {
+                stored != null -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.CheckCircle, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            buildString {
+                                append("Stored safely")
+                                if (!projectName.isNullOrBlank()) append(" · $projectName")
+                                append(" · ${stored.displayName}")
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.WarningAmber, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
-                    Spacer(Modifier.size(6.dp))
-                    Text(
-                        "Not in APKbox · deleting this file is not recoverable from the vault",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                candidate.hashReadFailed -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.WarningAmber, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.tertiary)
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            "SHA-256 read issue · vault match unknown · not marked safe",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                else -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.WarningAmber, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            "Not in APKbox · deleting this file is not recoverable from the vault",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
