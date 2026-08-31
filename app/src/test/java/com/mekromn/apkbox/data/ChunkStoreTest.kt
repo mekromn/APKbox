@@ -7,6 +7,7 @@ import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.security.MessageDigest
 import kotlin.random.Random
 
 class ChunkStoreTest {
@@ -93,6 +94,77 @@ class ChunkStoreTest {
         }
     }
 
+    @Test
+    fun fiftyRevisionVaultRoundTripPreservesEveryFileAndHash() {
+        val root = Files.createTempDirectory("apkbox-fifty-file-torture-test").toFile()
+        try {
+            val store = ChunkStore(File(root, "chunks"))
+            val base = Random(9001).nextBytes(2 * 1024 * 1024)
+            val originals = ArrayList<ByteArray>(50)
+            val stored = ArrayList<ChunkingResult>(50)
+
+            // Generate a realistic family: most bytes stay identical, each build has localized
+            // edits, and groups of builds share feature payloads that never existed in the base.
+            val sharedFeatures = List(5) { featureIndex ->
+                Random(10_000 + featureIndex).nextBytes(192 * 1024)
+            }
+
+            repeat(50) { revisionIndex ->
+                val bytes = base.copyOf()
+
+                // A group feature is shared by ten revisions and gives the vault opportunities to
+                // reuse data introduced by revisions rather than by the original base.
+                val feature = sharedFeatures[revisionIndex / 10]
+                val featureStart = 320 * 1024 + (revisionIndex / 10) * 256 * 1024
+                feature.copyInto(bytes, destinationOffset = featureStart)
+
+                // Each revision also carries a unique localized change.
+                val changeStart = 1_650_000 + revisionIndex * 2_048
+                repeat(1_024) { offset ->
+                    val index = changeStart + offset
+                    bytes[index] = (bytes[index].toInt() xor (revisionIndex + offset + 1)).toByte()
+                }
+
+                // Vary a small header-like region so no two test files are accidentally identical.
+                repeat(32) { offset ->
+                    bytes[4_096 + offset] = (revisionIndex * 31 + offset).toByte()
+                }
+
+                val file = File(root, "revision-${revisionIndex.toString().padStart(2, '0')}.apk")
+                    .apply { writeBytes(bytes) }
+                val result = store.ingest(file)
+
+                originals += bytes
+                stored += result
+                assertEquals("Ingest SHA must equal original SHA", sha256(bytes), result.apkSha256)
+            }
+
+            assertEquals(50, originals.size)
+            assertEquals(50, stored.size)
+
+            stored.forEachIndexed { index, result ->
+                val reconstructed = reconstruct(store, result)
+                val original = originals[index]
+
+                assertEquals("Revision $index reconstructed size", original.size, reconstructed.size)
+                assertArrayEquals("Revision $index must reconstruct byte-for-byte", original, reconstructed)
+                assertEquals("Revision $index original SHA", result.apkSha256, sha256(original))
+                assertEquals("Revision $index reconstructed SHA", result.apkSha256, sha256(reconstructed))
+            }
+
+            val logicalBytes = originals.sumOf { it.size.toLong() }
+            val physicalChunkBytes = File(root, "chunks").walkTopDown()
+                .filter { it.isFile && it.extension == "chunk" }
+                .sumOf { it.length() }
+            assertTrue(
+                "Fifty related revisions should occupy substantially less space than fifty full copies",
+                physicalChunkBytes < logicalBytes / 2,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun reconstruct(store: ChunkStore, result: ChunkingResult): ByteArray {
         val output = ByteArrayOutputStream()
         result.chunks.forEach { chunk ->
@@ -102,4 +174,7 @@ class ChunkStoreTest {
         }
         return output.toByteArray()
     }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 }
