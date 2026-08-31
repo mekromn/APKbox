@@ -3,6 +3,7 @@ package com.mekromn.apkbox.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ChunkRef
 import com.mekromn.apkbox.model.ImportResult
@@ -38,8 +39,12 @@ class LibraryStore(context: Context) {
     private val rootDir = File(appContext.filesDir, "apkbox-vault")
     private val manifestsDir = File(rootDir, "manifests")
     private val indexFile = File(rootDir, "library.json")
+    private val projectsFile = File(rootDir, "projects.json")
     private val chunkStore = ChunkStore(File(rootDir, "chunks"))
     private val mutex = Mutex()
+
+    private val _projects: MutableStateFlow<List<ApkProject>>
+    val projects: StateFlow<List<ApkProject>> get() = _projects.asStateFlow()
 
     private val _records: MutableStateFlow<List<ApkRecord>>
     val records: StateFlow<List<ApkRecord>> get() = _records.asStateFlow()
@@ -50,96 +55,141 @@ class LibraryStore(context: Context) {
     init {
         rootDir.mkdirs()
         manifestsDir.mkdirs()
-        val loaded = loadIndex()
-        val repaired = repairMetadataFromManifests(loaded)
-        _records = MutableStateFlow(repaired)
-        _stats = MutableStateFlow(calculateStats(repaired))
-        if (repaired != loaded) runCatching { saveIndex(repaired) }
+        val loadedRecords = loadIndex()
+        val repairedRecords = repairMetadataFromManifests(loadedRecords)
+        val loadedProjects = loadProjects()
+        val repairedProjects = repairProjects(loadedProjects, repairedRecords)
+
+        _projects = MutableStateFlow(repairedProjects)
+        _records = MutableStateFlow(sortRecords(repairedRecords))
+        _stats = MutableStateFlow(calculateStats(_records.value))
+
+        if (repairedRecords != loadedRecords) runCatching { saveIndex(_records.value) }
+        if (repairedProjects != loadedProjects) runCatching { saveProjects(repairedProjects) }
     }
 
-    suspend fun importBase(uri: Uri): ImportResult = importApk(uri, isBase = true)
-
-    suspend fun importRevision(uri: Uri): ImportResult = importApk(uri, isBase = false)
-
-    private suspend fun importApk(uri: Uri, isBase: Boolean): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun importBase(uri: Uri, projectName: String? = null): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val current = _records.value
-            if (isBase && current.isNotEmpty()) {
-                error("A base APK is already saved. Clear the vault before choosing a different base.")
+            val projectId = UUID.randomUUID().toString()
+            importApkLocked(uri, projectId, isBase = true, pendingProjectName = projectName)
+        }
+    }
+
+    /** Compatibility helper for a one-project vault. */
+    suspend fun importRevision(uri: Uri): ImportResult = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val project = _projects.value.singleOrNull()
+                ?: error("Choose which APKbox project should receive this revision.")
+            importApkLocked(uri, project.id, isBase = false)
+        }
+    }
+
+    suspend fun importRevision(projectId: String, uri: Uri): ImportResult = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(_projects.value.any { it.id == projectId }) { "That APKbox project no longer exists." }
+            importApkLocked(uri, projectId, isBase = false)
+        }
+    }
+
+    private fun importApkLocked(
+        uri: Uri,
+        projectId: String,
+        isBase: Boolean,
+        pendingProjectName: String? = null,
+    ): ImportResult {
+        val current = _records.value
+        val existingProject = _projects.value.firstOrNull { it.id == projectId }
+        if (!isBase) require(existingProject != null) { "Choose a project first." }
+
+        val sourceDisplayName = documentDisplayName(uri)
+        val tempFile = File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
+        try {
+            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output -> input.copyTo(output, 256 * 1024) }
+            } ?: error("The selected APK could not be opened.")
+
+            val archive = ApkInspector.inspect(appContext, tempFile)
+            if (!isBase && existingProject != null && archive.packageName != existingProject.packageName) {
+                error(
+                    "This APK belongs to ${archive.packageName}, but ${existingProject.name} contains " +
+                        "${existingProject.packageName}. Choose the matching project or create a new one."
+                )
             }
-            if (!isBase && current.none { it.isBase }) {
-                error("Choose a base APK first.")
+
+            val chunking = chunkStore.ingest(tempFile)
+            if (current.any { it.projectId == projectId && it.sha256 == chunking.apkSha256 }) {
+                error("That exact APK is already stored in this project.")
             }
 
-            val sourceDisplayName = documentDisplayName(uri)
-            val tempFile = File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
-            try {
-                appContext.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(tempFile).use { output -> input.copyTo(output, 256 * 1024) }
-                } ?: error("The selected APK could not be opened.")
+            val authoritativeSize = chunking.chunks.sumOf { it.size.toLong() }
+            check(authoritativeSize == tempFile.length()) {
+                "Import size verification failed before the APK was stored."
+            }
 
-                val archive = ApkInspector.inspect(appContext, tempFile)
-                val base = current.firstOrNull { it.isBase }
-                if (!isBase && base != null && archive.packageName != base.packageName) {
-                    error(
-                        "This APK belongs to ${archive.packageName}, but the saved base is ${base.packageName}. " +
-                            "APKbox keeps one package family per vault."
-                    )
-                }
+            val id = UUID.randomUUID().toString()
+            val record = ApkRecord(
+                id = id,
+                projectId = projectId,
+                displayName = sourceDisplayName ?: archive.label,
+                label = archive.label,
+                packageName = archive.packageName,
+                versionName = archive.versionName,
+                versionCode = archive.versionCode,
+                sizeBytes = authoritativeSize,
+                sha256 = chunking.apkSha256,
+                signingCertSha256 = archive.signingCertSha256,
+                addedAtEpochMs = System.currentTimeMillis(),
+                isBase = isBase,
+                chunkCount = chunking.chunks.size,
+                newBytesAdded = chunking.uniqueBytesAdded,
+            )
 
-                val chunking = chunkStore.ingest(tempFile)
-                if (current.any { it.sha256 == chunking.apkSha256 }) {
-                    error("That exact APK is already stored in APKbox.")
-                }
-
-                val authoritativeSize = chunking.chunks.sumOf { it.size.toLong() }
-                check(authoritativeSize == tempFile.length()) {
-                    "Import size verification failed before the APK was stored."
-                }
-
-                val id = UUID.randomUUID().toString()
-                val record = ApkRecord(
-                    id = id,
-                    projectId = LEGACY_PROJECT_ID,
-                    displayName = sourceDisplayName ?: archive.label,
-                    label = archive.label,
+            writeManifest(record.id, chunking.chunks)
+            val updatedRecords = sortRecords(current + record)
+            val updatedProjects = if (isBase) {
+                val name = pendingProjectName?.trim().takeUnless { it.isNullOrBlank() } ?: archive.label
+                (_projects.value + ApkProject(
+                    id = projectId,
+                    name = name,
                     packageName = archive.packageName,
-                    versionName = archive.versionName,
-                    versionCode = archive.versionCode,
-                    sizeBytes = authoritativeSize,
-                    sha256 = chunking.apkSha256,
-                    signingCertSha256 = archive.signingCertSha256,
-                    addedAtEpochMs = System.currentTimeMillis(),
-                    isBase = isBase,
-                    chunkCount = chunking.chunks.size,
-                    newBytesAdded = chunking.uniqueBytesAdded,
-                )
+                    createdAtEpochMs = System.currentTimeMillis(),
+                )).sortedBy { it.name.lowercase() }
+            } else _projects.value
 
-                writeManifest(record.id, chunking.chunks)
-                val updated = (current + record).sortedWith(
-                    compareByDescending<ApkRecord> { it.isBase }.thenByDescending { it.addedAtEpochMs }
-                )
-                saveIndex(updated)
-                _records.value = updated
-                _stats.value = calculateStats(updated)
+            saveIndex(updatedRecords)
+            saveProjects(updatedProjects)
+            _projects.value = updatedProjects
+            _records.value = updatedRecords
+            _stats.value = calculateStats(updatedRecords)
 
-                ImportResult(
-                    record = record,
-                    reusedBytes = max(0L, record.sizeBytes - record.newBytesAdded),
-                )
-            } catch (t: Throwable) {
-                garbageCollectInternal(_records.value)
-                throw t
-            } finally {
-                tempFile.delete()
-            }
+            return ImportResult(
+                record = record,
+                reusedBytes = max(0L, record.sizeBytes - record.newBytesAdded),
+            )
+        } catch (t: Throwable) {
+            garbageCollectInternal(_records.value)
+            throw t
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    suspend fun renameProject(projectId: String, newName: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val clean = newName.trim()
+            require(clean.isNotEmpty()) { "Project name cannot be empty." }
+            require(_projects.value.any { it.id == projectId }) { "Project not found." }
+            val updated = _projects.value.map { if (it.id == projectId) it.copy(name = clean) else it }
+                .sortedBy { it.name.lowercase() }
+            saveProjects(updated)
+            _projects.value = updated
         }
     }
 
     suspend fun deleteRevision(recordId: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val record = _records.value.firstOrNull { it.id == recordId } ?: return@withLock
-            require(!record.isBase) { "The base APK cannot be deleted while revisions exist. Clear the vault instead." }
+            require(!record.isBase) { "Delete the project to remove its base APK." }
 
             val updated = _records.value.filterNot { it.id == recordId }
             manifestFile(recordId).delete()
@@ -150,11 +200,28 @@ class LibraryStore(context: Context) {
         }
     }
 
+    suspend fun deleteProject(projectId: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(_projects.value.any { it.id == projectId }) { "Project not found." }
+            val removedRecords = _records.value.filter { it.projectId == projectId }
+            val remainingRecords = _records.value.filterNot { it.projectId == projectId }
+            val remainingProjects = _projects.value.filterNot { it.id == projectId }
+            removedRecords.forEach { manifestFile(it.id).delete() }
+            saveIndex(remainingRecords)
+            saveProjects(remainingProjects)
+            _records.value = remainingRecords
+            _projects.value = remainingProjects
+            garbageCollectInternal(remainingRecords)
+            _stats.value = calculateStats(remainingRecords)
+        }
+    }
+
     suspend fun clearVault() = withContext(Dispatchers.IO) {
         mutex.withLock {
             rootDir.deleteRecursively()
             rootDir.mkdirs()
             manifestsDir.mkdirs()
+            _projects.value = emptyList()
             _records.value = emptyList()
             _stats.value = VaultStats()
         }
@@ -222,6 +289,24 @@ class LibraryStore(context: Context) {
         }.getOrDefault(record)
     }
 
+    private fun repairProjects(projects: List<ApkProject>, records: List<ApkRecord>): List<ApkProject> {
+        if (records.isEmpty()) return projects
+        val byId = projects.associateBy { it.id }.toMutableMap()
+        records.groupBy { it.projectId }.forEach { (projectId, projectRecords) ->
+            if (projectId !in byId) {
+                val base = projectRecords.firstOrNull { it.isBase } ?: projectRecords.first()
+                byId[projectId] = ApkProject(
+                    id = projectId,
+                    name = base.label,
+                    packageName = base.packageName,
+                    createdAtEpochMs = base.addedAtEpochMs,
+                )
+            }
+        }
+        val liveIds = records.mapTo(hashSetOf()) { it.projectId }
+        return byId.values.filter { it.id in liveIds }.sortedBy { it.name.lowercase() }
+    }
+
     private fun writeManifest(recordId: String, chunks: List<ChunkRef>) {
         val target = manifestFile(recordId)
         val temp = File(target.parentFile, ".${target.name}.tmp")
@@ -281,6 +366,29 @@ class LibraryStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
+    private fun saveProjects(projects: List<ApkProject>) {
+        val array = JSONArray()
+        projects.forEach { array.put(it.toJson()) }
+        val root = JSONObject().put("schema", 1).put("projects", array)
+        val temp = File(rootDir, ".projects.json.tmp")
+        FileOutputStream(temp).use { output ->
+            output.write(root.toString().toByteArray(Charsets.UTF_8))
+            output.fd.sync()
+        }
+        atomicReplace(temp, projectsFile)
+    }
+
+    private fun loadProjects(): List<ApkProject> {
+        if (!projectsFile.isFile) return emptyList()
+        return runCatching {
+            val root = JSONObject(projectsFile.readText())
+            val array = root.getJSONArray("projects")
+            buildList {
+                for (index in 0 until array.length()) add(array.getJSONObject(index).toProject())
+            }
+        }.getOrDefault(emptyList())
+    }
+
     private fun garbageCollectInternal(records: List<ApkRecord>) {
         val referenced = HashSet<String>()
         try {
@@ -324,6 +432,12 @@ class LibraryStore(context: Context) {
 
     private fun manifestFile(recordId: String) = File(manifestsDir, "$recordId.apkm")
 
+    private fun sortRecords(records: List<ApkRecord>): List<ApkRecord> = records.sortedWith(
+        compareBy<ApkRecord> { it.projectId }
+            .thenByDescending { it.isBase }
+            .thenByDescending { it.addedAtEpochMs }
+    )
+
     private fun atomicReplace(temp: File, target: File) {
         target.parentFile?.mkdirs()
         if (target.exists()) target.delete()
@@ -332,6 +446,19 @@ class LibraryStore(context: Context) {
             temp.delete()
         }
     }
+
+    private fun ApkProject.toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("name", name)
+        .put("packageName", packageName)
+        .put("createdAtEpochMs", createdAtEpochMs)
+
+    private fun JSONObject.toProject(): ApkProject = ApkProject(
+        id = getString("id"),
+        name = getString("name"),
+        packageName = getString("packageName"),
+        createdAtEpochMs = getLong("createdAtEpochMs"),
+    )
 
     private fun ApkRecord.toJson(): JSONObject = JSONObject()
         .put("id", id)
