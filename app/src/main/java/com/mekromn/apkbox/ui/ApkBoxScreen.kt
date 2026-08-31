@@ -322,7 +322,11 @@ private fun EmptyVault(modifier: Modifier, busy: Boolean, onChooseBase: () -> Un
                 )
             }
             Spacer(Modifier.height(28.dp))
-            Text("One APK. Every revision.", MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "One APK. Every revision.",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+            )
             Spacer(Modifier.height(10.dp))
             Text(
                 "Choose the APK your development builds are based on. APKbox remembers it and stores only unique chunk data from later revisions.",
