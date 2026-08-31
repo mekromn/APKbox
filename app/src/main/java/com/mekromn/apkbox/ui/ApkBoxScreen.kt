@@ -3,7 +3,6 @@ package com.mekromn.apkbox.ui
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,19 +21,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FolderZip
-import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -63,12 +61,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ReplaceReason
 import com.mekromn.apkbox.model.ReplaceRequest
@@ -78,28 +75,32 @@ import java.text.NumberFormat
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ApkBoxScreen(
+    project: ApkProject,
     records: List<ApkRecord>,
-    stats: VaultStats,
+    globalStats: VaultStats,
     busy: Boolean,
     message: String?,
     replaceRequest: ReplaceRequest?,
     onMessageShown: () -> Unit,
-    onChooseBase: () -> Unit,
+    onBackToProjects: () -> Unit,
     onAddRevision: () -> Unit,
     onInstall: (ApkRecord) -> Unit,
+    onExport: (ApkRecord) -> Unit,
+    onShare: (ApkRecord) -> Unit,
     onDelete: (ApkRecord) -> Unit,
-    onClearVault: () -> Unit,
+    onDeleteProject: () -> Unit,
     onConfirmReplace: () -> Unit,
     onCancelReplace: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
     var query by remember { mutableStateOf("") }
-    var overflowOpen by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<ApkRecord?>(null) }
-    var clearRequested by remember { mutableStateOf(false) }
+    var deleteProjectRequested by remember { mutableStateOf(false) }
 
     val base = records.firstOrNull { it.isBase }
-    val visibleRevisions = records.filter { !it.isBase }.filter { record ->
+    val revisions = records.filterNot { it.isBase }
+    val visibleRevisions = revisions.filter { record ->
         query.isBlank() || listOf(
             record.displayName,
             record.label,
@@ -122,49 +123,40 @@ fun ApkBoxScreen(
         topBar = {
             Column {
                 TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = onBackToProjects) {
+                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Projects")
+                        }
+                    },
                     title = {
                         Column {
-                            Text("APKbox", fontWeight = FontWeight.Bold)
-                            if (base != null) {
-                                Text(
-                                    base.packageName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                            Text(project.name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                project.packageName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    },
+                    actions = {
+                        Box {
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "Project options")
+                            }
+                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Delete project") },
+                                    leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null) },
+                                    onClick = { menuOpen = false; deleteProjectRequested = true },
                                 )
                             }
                         }
                     },
-                    actions = {
-                        if (records.isNotEmpty()) {
-                            Box {
-                                IconButton(onClick = { overflowOpen = true }) {
-                                    Icon(Icons.Rounded.MoreVert, contentDescription = "More options")
-                                }
-                                DropdownMenu(
-                                    expanded = overflowOpen,
-                                    onDismissRequest = { overflowOpen = false },
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Clear entire vault") },
-                                        leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null) },
-                                        onClick = {
-                                            overflowOpen = false
-                                            clearRequested = true
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                    ),
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 )
-                AnimatedVisibility(busy) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
-                }
+                AnimatedVisibility(busy) { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             }
         },
         floatingActionButton = {
@@ -177,27 +169,19 @@ fun ApkBoxScreen(
                 )
             }
         },
-    ) { scaffoldPadding ->
-        if (base == null) {
-            EmptyVault(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(scaffoldPadding),
-                busy = busy,
-                onChooseBase = onChooseBase,
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = scaffoldPadding.calculateTopPadding() + 12.dp,
-                    bottom = scaffoldPadding.calculateBottomPadding() + 104.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item { StorageHero(stats) }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                top = padding.calculateTopPadding() + 12.dp,
+                bottom = padding.calculateBottomPadding() + 104.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item { ProjectStorageCard(records, globalStats) }
+            if (base != null) {
                 item { SectionLabel("BASE") }
                 item {
                     RevisionCard(
@@ -205,51 +189,59 @@ fun ApkBoxScreen(
                         base = base,
                         busy = busy,
                         onInstall = { onInstall(base) },
+                        onExport = { onExport(base) },
+                        onShare = { onShare(base) },
                         onDelete = null,
                     )
                 }
+            }
+            item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { SectionLabel("REVISIONS") }
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Text(
+                            revisions.size.toString(),
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+            item {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(22.dp),
+                    placeholder = { Text("Search filename, version, build code, or hash") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, null) },
+                )
+            }
+            if (visibleRevisions.isEmpty()) {
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                     ) {
-                        Box(Modifier.weight(1f)) { SectionLabel("REVISIONS") }
-                        Surface(
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                        ) {
-                            Text(
-                                stats.revisionCount.toString(),
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            )
+                        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Rounded.FolderZip, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.size(8.dp))
+                            Text(if (query.isBlank()) "No revisions yet" else "No matching revisions", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
-                item {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(22.dp),
-                        placeholder = { Text("Search filename, version, build code, or hash") },
-                        leadingIcon = { Icon(Icons.Rounded.Search, null) },
+            } else {
+                items(visibleRevisions, key = { it.id }) { record ->
+                    RevisionCard(
+                        record = record,
+                        base = base ?: record,
+                        busy = busy,
+                        onInstall = { onInstall(record) },
+                        onExport = { onExport(record) },
+                        onShare = { onShare(record) },
+                        onDelete = { deleteCandidate = record },
                     )
-                }
-
-                if (visibleRevisions.isEmpty()) {
-                    item { EmptyRevisions(query.isNotBlank()) }
-                } else {
-                    items(visibleRevisions, key = { it.id }) { record ->
-                        RevisionCard(
-                            record = record,
-                            base = base,
-                            busy = busy,
-                            onInstall = { onInstall(record) },
-                            onDelete = { deleteCandidate = record },
-                        )
-                    }
                 }
             }
         }
@@ -259,60 +251,40 @@ fun ApkBoxScreen(
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
             title = { Text("Delete ${record.displayName}?") },
-            text = { Text("Unused chunks will be removed automatically; shared chunks stay available to other revisions.") },
+            text = { Text("Unused chunks will be removed; chunks shared by other revisions or projects stay in the global vault.") },
             confirmButton = {
-                TextButton(onClick = {
-                    deleteCandidate = null
-                    onDelete(record)
-                }) { Text("Delete") }
+                TextButton(onClick = { deleteCandidate = null; onDelete(record) }) { Text("Delete") }
             },
-            dismissButton = {
-                TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") }
-            },
+            dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } },
         )
     }
 
-    if (clearRequested) {
+    if (deleteProjectRequested) {
         AlertDialog(
-            onDismissRequest = { clearRequested = false },
-            title = { Text("Clear APKbox?") },
-            text = { Text("This removes the saved base, all revision manifests, and every chunk in this vault.") },
+            onDismissRequest = { deleteProjectRequested = false },
+            title = { Text("Delete ${project.name}?") },
+            text = { Text("This removes the project's base and revisions. Chunks still used by another project remain stored.") },
             confirmButton = {
-                TextButton(onClick = {
-                    clearRequested = false
-                    onClearVault()
-                }) { Text("Clear vault") }
+                TextButton(onClick = { deleteProjectRequested = false; onDeleteProject() }) { Text("Delete project") }
             },
-            dismissButton = {
-                TextButton(onClick = { clearRequested = false }) { Text("Cancel") }
-            },
+            dismissButton = { TextButton(onClick = { deleteProjectRequested = false }) { Text("Cancel") } },
         )
     }
 
-    replaceRequest?.let { request ->
+    replaceRequest?.takeIf { it.record.projectId == project.id }?.let { request ->
         val installed = request.installedVersionName
             ?.let { "$it (code ${request.installedVersionCode})" }
             ?: "code ${request.installedVersionCode}"
         val reason = when (request.reason) {
-            ReplaceReason.DOWNGRADE ->
-                "Android will not install this older revision over the currently installed $installed."
-            ReplaceReason.SIGNATURE_MISMATCH ->
-                "The selected revision is signed with a different certificate than the currently installed $installed."
+            ReplaceReason.DOWNGRADE -> "Android will not install this older revision over the currently installed $installed."
+            ReplaceReason.SIGNATURE_MISMATCH -> "The selected revision is signed with a different certificate than the currently installed $installed."
         }
         AlertDialog(
             onDismissRequest = onCancelReplace,
             title = { Text("Replace installed app?") },
-            text = {
-                Text(
-                    "$reason\n\nTo switch to ${request.record.displayName}, APKbox must open Android's uninstall confirmation first, then install the selected revision. Uninstalling removes that app's local data. APKbox's stored revisions are not affected."
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = onConfirmReplace) { Text("Uninstall & install") }
-            },
-            dismissButton = {
-                TextButton(onClick = onCancelReplace) { Text("Cancel") }
-            },
+            text = { Text("$reason\n\nAPKbox must open Android's uninstall confirmation first. Uninstalling removes that app's local data; APKbox's stored revision remains intact.") },
+            confirmButton = { TextButton(onClick = onConfirmReplace) { Text("Uninstall & install") } },
+            dismissButton = { TextButton(onClick = onCancelReplace) { Text("Cancel") } },
         )
     }
 }
@@ -329,122 +301,31 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun EmptyVault(modifier: Modifier, busy: Boolean, onChooseBase: () -> Unit) {
-    Box(modifier.padding(24.dp), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(112.dp)
-                    .clip(RoundedCornerShape(34.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primaryContainer,
-                                MaterialTheme.colorScheme.tertiaryContainer,
-                            )
-                        )
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Rounded.Inventory2,
-                    null,
-                    modifier = Modifier.size(58.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            }
-            Spacer(Modifier.height(28.dp))
-            Text(
-                "One APK. Every revision.",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "Choose the APK your development builds are based on. APKbox remembers it and stores only unique chunk data from later revisions.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(28.dp))
-            Button(enabled = !busy, onClick = onChooseBase) {
-                if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Rounded.FolderZip, null)
-                Spacer(Modifier.size(10.dp))
-                Text("Choose base APK")
-            }
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Shield, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.size(6.dp))
-                Text(
-                    "Exact bytes preserved · original signatures stay intact",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun StorageHero(stats: VaultStats) {
+private fun ProjectStorageCard(records: List<ApkRecord>, globalStats: VaultStats) {
     val context = LocalContext.current
-    val percent = NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(stats.savedPercent)
+    val logical = records.sumOf { it.sizeBytes }
+    val projectNew = records.sumOf { it.newBytesAdded }
+    val reused = (logical - projectNew).coerceAtLeast(0L)
+    val reusedPercent = if (logical == 0L) 0.0 else reused.toDouble() / logical * 100.0
+    val percent = NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(reusedPercent)
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
     ) {
         Column(Modifier.padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Space saved", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        Formatter.formatFileSize(context, stats.savedBytes),
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)) {
-                    Text("$percent%", Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.Bold)
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatTile(Modifier.weight(1f), "Vault", Formatter.formatFileSize(context, stats.physicalBytes))
-                StatTile(Modifier.weight(1f), "Full copies", Formatter.formatFileSize(context, stats.logicalBytes))
-                StatTile(Modifier.weight(1f), "Builds", (stats.revisionCount + 1).toString())
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatTile(modifier: Modifier, label: String, value: String) {
-    Surface(modifier, shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)) {
-        Column(Modifier.padding(12.dp)) {
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-private fun EmptyRevisions(searching: Boolean) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-    ) {
-        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Rounded.FolderZip, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(8.dp))
-            Text(if (searching) "No matching revisions" else "No revisions yet", fontWeight = FontWeight.SemiBold)
-            if (!searching) {
-                Text(
-                    "Add one or many builds at once. APKbox keeps only chunks it hasn't already stored.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text("Project reuse", style = MaterialTheme.typography.labelLarge)
+            Text("$percent%", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "${Formatter.formatFileSize(context, logical)} as full copies · ${records.size} build${if (records.size == 1) "" else "s"}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Text(
+                "Global vault: ${Formatter.formatFileSize(context, globalStats.physicalBytes)} physical",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
         }
     }
 }
@@ -455,6 +336,8 @@ private fun RevisionCard(
     base: ApkRecord,
     busy: Boolean,
     onInstall: () -> Unit,
+    onExport: () -> Unit,
+    onShare: () -> Unit,
     onDelete: (() -> Unit)?,
 ) {
     val context = LocalContext.current
@@ -494,35 +377,48 @@ private fun RevisionCard(
                     )
                 }
                 if (onDelete != null) {
-                    IconButton(enabled = !busy, onClick = onDelete) { Icon(Icons.Rounded.DeleteOutline, "Delete revision") }
+                    IconButton(enabled = !busy, onClick = onDelete) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete revision")
+                    }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.size(12.dp))
             HorizontalDivider()
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.size(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         if (record.isBase) "${Formatter.formatFileSize(context, record.sizeBytes)} base APK"
-                        else "${Formatter.formatFileSize(context, record.newBytesAdded)} new · $percent% reused",
+                        else "${Formatter.formatFileSize(context, record.newBytesAdded)} new · $percent% vault-wide reused",
                         style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
                         "${record.chunkCount} chunks · ${DateUtils.getRelativeTimeSpanString(record.addedAtEpochMs)}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(record.sha256.take(16), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        record.sha256.take(16),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(enabled = !busy, onClick = onExport) {
+                    Icon(Icons.Rounded.Download, contentDescription = "Export APK")
+                }
+                IconButton(enabled = !busy, onClick = onShare) {
+                    Icon(Icons.Rounded.Share, contentDescription = "Share APK")
                 }
                 FilledTonalButton(enabled = !busy, onClick = onInstall) {
                     Icon(Icons.Rounded.PlayArrow, null)
-                    Spacer(Modifier.size(6.dp))
+                    Spacer(Modifier.size(5.dp))
                     Text("Install")
                 }
             }
 
             if (signingMismatch) {
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.size(12.dp))
                 Surface(
                     Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
@@ -532,18 +428,22 @@ private fun RevisionCard(
                         Icon(Icons.Rounded.Shield, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
                         Spacer(Modifier.size(8.dp))
                         Text(
-                            "Different signing certificate — switching from another key requires replacing the installed app.",
+                            "Different signing certificate — switching keys requires replacing the installed app.",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
                     }
                 }
             } else if (!record.isBase) {
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.size(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.CheckCircle, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.size(6.dp))
-                    Text("Byte-exact revision stored", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Byte-exact revision stored",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
