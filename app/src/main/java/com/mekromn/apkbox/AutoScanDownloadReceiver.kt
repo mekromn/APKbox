@@ -7,6 +7,7 @@ import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Wakes APKbox after Android DownloadManager finishes a download and runs the configured rules. */
@@ -16,6 +17,8 @@ class AutoScanDownloadReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
+                // Let the final rename/mtime settle before the scanner's stable-file guard runs.
+                delay(2_500L)
                 val scanner = ApkBoxServices.autoScanner(context)
                 scanner.reloadFromDisk()
                 scanner.scanNow("Android download complete")
