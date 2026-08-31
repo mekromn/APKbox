@@ -1,5 +1,6 @@
 package com.mekromn.apkbox
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -7,14 +8,17 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.compose.setContent
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.install.ApkInstaller
 import com.mekromn.apkbox.model.ApkRecord
+import com.mekromn.apkbox.model.ReplaceReason
+import com.mekromn.apkbox.model.ReplaceRequest
 import com.mekromn.apkbox.ui.ApkBoxScreen
 import com.mekromn.apkbox.ui.theme.APKboxTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,7 +30,24 @@ class MainActivity : ComponentActivity() {
 
     private val busy = MutableStateFlow(false)
     private val message = MutableStateFlow<String?>(null)
+    private val replaceRequest = MutableStateFlow<ReplaceRequest?>(null)
+
     private var installWaitingForPermission: ApkRecord? = null
+    private var installWaitingForRemoval: ApkRecord? = null
+
+    private val uninstallLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val record = installWaitingForRemoval ?: return@registerForActivityResult
+        installWaitingForRemoval = null
+
+        val stillInstalled = ApkInspector.inspectInstalled(this, record.packageName) != null
+        if (result.resultCode == Activity.RESULT_OK || !stillInstalled) {
+            requestInstall(record)
+        } else {
+            message.value = "Replacement cancelled · the installed app was left unchanged"
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,6 +59,7 @@ class MainActivity : ComponentActivity() {
                 val stats = libraryStore.stats.collectAsStateWithLifecycle().value
                 val isBusy = busy.collectAsStateWithLifecycle().value
                 val currentMessage = message.collectAsStateWithLifecycle().value
+                val currentReplaceRequest = replaceRequest.collectAsStateWithLifecycle().value
 
                 val basePicker = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.OpenDocument(),
@@ -45,9 +67,9 @@ class MainActivity : ComponentActivity() {
                     if (uri != null) importBase(uri)
                 }
                 val revisionPicker = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.OpenDocument(),
-                ) { uri ->
-                    if (uri != null) importRevision(uri)
+                    contract = ActivityResultContracts.OpenMultipleDocuments(),
+                ) { uris ->
+                    if (uris.isNotEmpty()) importRevisions(uris)
                 }
 
                 ApkBoxScreen(
@@ -55,26 +77,19 @@ class MainActivity : ComponentActivity() {
                     stats = stats,
                     busy = isBusy,
                     message = currentMessage,
+                    replaceRequest = currentReplaceRequest,
                     onMessageShown = { message.value = null },
                     onChooseBase = {
-                        basePicker.launch(
-                            arrayOf(
-                                "application/vnd.android.package-archive",
-                                "application/octet-stream",
-                            )
-                        )
+                        basePicker.launch(apkMimeTypes())
                     },
                     onAddRevision = {
-                        revisionPicker.launch(
-                            arrayOf(
-                                "application/vnd.android.package-archive",
-                                "application/octet-stream",
-                            )
-                        )
+                        revisionPicker.launch(apkMimeTypes())
                     },
                     onInstall = ::requestInstall,
                     onDelete = ::deleteRevision,
                     onClearVault = ::clearVault,
+                    onConfirmReplace = ::confirmReplacement,
+                    onCancelReplace = { replaceRequest.value = null },
                 )
             }
         }
@@ -85,31 +100,63 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && packageManager.canRequestPackageInstalls()) {
             installWaitingForPermission?.let { record ->
                 installWaitingForPermission = null
-                installRecord(record)
+                requestInstall(record)
             }
         }
     }
 
+    private fun apkMimeTypes(): Array<String> = arrayOf(
+        "application/vnd.android.package-archive",
+        "application/octet-stream",
+    )
+
     private fun importBase(uri: Uri) {
         runBusyTask {
             val result = libraryStore.importBase(uri)
-            "Base saved: ${result.record.label} ${result.record.versionName}"
+            "Base saved · ${result.record.displayName}"
         }
     }
 
-    private fun importRevision(uri: Uri) {
+    private fun importRevisions(uris: List<Uri>) {
         runBusyTask {
-            val result = libraryStore.importRevision(uri)
-            val percent = if (result.record.sizeBytes == 0L) 0
-            else (result.reusedBytes * 100L / result.record.sizeBytes).coerceIn(0L, 100L)
-            "Revision saved · $percent% of APK bytes reused"
+            var added = 0
+            var skipped = 0
+            var logicalBytes = 0L
+            var reusedBytes = 0L
+            var firstFailure: String? = null
+
+            for (uri in uris) {
+                runCatching { libraryStore.importRevision(uri) }
+                    .onSuccess { result ->
+                        added++
+                        logicalBytes += result.record.sizeBytes
+                        reusedBytes += result.reusedBytes
+                    }
+                    .onFailure { failure ->
+                        skipped++
+                        if (firstFailure == null) firstFailure = failure.message
+                    }
+            }
+
+            if (added == 0) {
+                error(firstFailure ?: "No revisions were imported.")
+            }
+
+            val reusedPercent = if (logicalBytes == 0L) 0L
+            else (reusedBytes * 100L / logicalBytes).coerceIn(0L, 100L)
+            buildString {
+                append("Saved $added revision")
+                if (added != 1) append('s')
+                append(" · $reusedPercent% of APK bytes reused")
+                if (skipped > 0) append(" · $skipped skipped")
+            }
         }
     }
 
     private fun deleteRevision(record: ApkRecord) {
         runBusyTask {
             libraryStore.deleteRevision(record.id)
-            "${record.versionName} removed and unused chunks cleaned up"
+            "${record.displayName} removed · unused chunks cleaned up"
         }
     }
 
@@ -122,6 +169,7 @@ class MainActivity : ComponentActivity() {
 
     private fun requestInstall(record: ApkRecord) {
         if (busy.value) return
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             installWaitingForPermission = record
             message.value = "Allow APKbox to install unknown apps, then return here."
@@ -133,13 +181,58 @@ class MainActivity : ComponentActivity() {
             )
             return
         }
+
+        val installed = ApkInspector.inspectInstalled(this, record.packageName)
+        if (installed != null) {
+            val signingMismatch = installed.signingCertSha256 != null &&
+                record.signingCertSha256 != null &&
+                installed.signingCertSha256 != record.signingCertSha256
+
+            val reason = when {
+                signingMismatch -> ReplaceReason.SIGNATURE_MISMATCH
+                installed.versionCode > record.versionCode -> ReplaceReason.DOWNGRADE
+                else -> null
+            }
+
+            if (reason != null) {
+                replaceRequest.value = ReplaceRequest(
+                    record = record,
+                    installedVersionName = installed.versionName,
+                    installedVersionCode = installed.versionCode,
+                    reason = reason,
+                )
+                return
+            }
+        }
+
         installRecord(record)
+    }
+
+    private fun confirmReplacement() {
+        val request = replaceRequest.value ?: return
+        replaceRequest.value = null
+        installWaitingForRemoval = request.record
+
+        // PackageInstaller.uninstall() is restricted to the installer-of-record. APKbox also needs
+        // to replace builds that were originally installed by adb, a file manager, or another
+        // installer, so use Android's user-confirmed uninstaller activity for this explicit action.
+        @Suppress("DEPRECATION")
+        val uninstallIntent = Intent(
+            Intent.ACTION_UNINSTALL_PACKAGE,
+            Uri.parse("package:${request.record.packageName}"),
+        ).putExtra(Intent.EXTRA_RETURN_RESULT, true)
+
+        runCatching { uninstallLauncher.launch(uninstallIntent) }
+            .onFailure { failure ->
+                installWaitingForRemoval = null
+                message.value = failure.message ?: "Android could not open the uninstall confirmation."
+            }
     }
 
     private fun installRecord(record: ApkRecord) {
         runBusyTask {
             apkInstaller.install(record)
-            "${record.versionName} reconstructed and verified · continue in Android installer"
+            "${record.displayName} reconstructed and verified · continue in Android installer"
         }
     }
 
