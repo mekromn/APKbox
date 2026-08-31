@@ -15,11 +15,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -254,7 +254,9 @@ private fun SharedFilesCard(
                         shape = RoundedCornerShape(14.dp),
                         color = MaterialTheme.colorScheme.secondaryContainer,
                     ) {
-                        Icon(Icons.Rounded.Android, null, Modifier.padding(10.dp).size(25.dp))
+                        // This is intentionally a neutral file glyph. APKbox only displays an app
+                        // icon after it has extracted that icon from the exact stored APK.
+                        Icon(Icons.Rounded.InsertDriveFile, null, Modifier.padding(10.dp).size(25.dp))
                     }
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                         Text(preview.displayName, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)

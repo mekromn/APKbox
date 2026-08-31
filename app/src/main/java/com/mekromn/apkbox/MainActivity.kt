@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -25,12 +26,17 @@ import com.mekromn.apkbox.data.VaultBackupManager
 import com.mekromn.apkbox.install.ApkInstaller
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
+import com.mekromn.apkbox.model.BatchImportItem
+import com.mekromn.apkbox.model.BatchImportReport
+import com.mekromn.apkbox.model.BatchImportStatus
+import com.mekromn.apkbox.model.IconRegenerationOutcome
 import com.mekromn.apkbox.model.ReplaceReason
 import com.mekromn.apkbox.model.ReplaceRequest
 import com.mekromn.apkbox.ui.ApkBoxScreen
 import com.mekromn.apkbox.ui.ApkCleanupScreen
 import com.mekromn.apkbox.ui.ApkFilePickerScreen
 import com.mekromn.apkbox.ui.ApkPickerMode
+import com.mekromn.apkbox.ui.BatchResultsScreen
 import com.mekromn.apkbox.ui.ProjectsScreen
 import com.mekromn.apkbox.ui.SharedApkScreen
 import com.mekromn.apkbox.ui.theme.APKboxTheme
@@ -65,6 +71,7 @@ class MainActivity : ComponentActivity() {
     private val directFileAccess = MutableStateFlow(false)
     private val pendingSharedUris = MutableStateFlow<List<Uri>>(emptyList())
     private val cleanupRequested = MutableStateFlow(false)
+    private val batchReport = MutableStateFlow<BatchImportReport?>(null)
 
     private var installWaitingForPermission: ApkRecord? = null
     private var installWaitingForRemoval: ApkRecord? = null
@@ -109,6 +116,7 @@ class MainActivity : ComponentActivity() {
                 val hasFileAccess = directFileAccess.collectAsStateWithLifecycle().value
                 val sharedUris = pendingSharedUris.collectAsStateWithLifecycle().value
                 val cleanupOpen = cleanupRequested.collectAsStateWithLifecycle().value
+                val currentBatchReport = batchReport.collectAsStateWithLifecycle().value
 
                 LaunchedEffect(projects, currentProjectId, overviewRequested) {
                     if (currentProjectId != null && projects.none { it.id == currentProjectId }) {
@@ -139,6 +147,13 @@ class MainActivity : ComponentActivity() {
                             onDismiss = { pendingSharedUris.value = emptyList() },
                             onAddToProject = ::importSharedToProject,
                             onCreateProject = ::createProjectFromShared,
+                        )
+                    }
+                    currentBatchReport != null -> {
+                        BatchResultsScreen(
+                            report = currentBatchReport,
+                            projectName = projects.firstOrNull { it.id == currentBatchReport.projectId }?.name,
+                            onDone = { batchReport.value = null },
                         )
                     }
                     cleanupOpen -> {
@@ -197,6 +212,7 @@ class MainActivity : ComponentActivity() {
                                     pickerMode.value = ApkPickerMode.BASE
                                 },
                                 onCleanupApks = { cleanupRequested.value = true },
+                                onRegenerateAllIcons = ::regenerateAllIcons,
                                 onBackupVault = ::backupVault,
                                 onRestoreVault = ::restoreVault,
                             )
@@ -222,6 +238,10 @@ class MainActivity : ComponentActivity() {
                                 onShare = ::shareRecord,
                                 onDelete = ::deleteRevision,
                                 onDeleteProject = { deleteProject(selectedProject) },
+                                onRenameProject = { newName -> renameProject(selectedProject, newName) },
+                                onToggleStar = ::toggleStar,
+                                onUpdateDetails = ::updateRecordDetails,
+                                onRegenerateIcon = ::regenerateRecordIcon,
                                 onConfirmReplace = ::confirmReplacement,
                                 onCancelReplace = { replaceRequest.value = null },
                             )
@@ -261,6 +281,7 @@ class MainActivity : ComponentActivity() {
             pickerMode.value = null
             pickerProjectId.value = null
             cleanupRequested.value = false
+            batchReport.value = null
             pendingSharedUris.value = uris
         }
     }
@@ -337,77 +358,114 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun importRevisions(projectId: String, uris: List<Uri>) {
-        runBusyTask {
-            importRevisionBatch(projectId, uris)
-        }
+        runBatchTask(
+            block = { importRevisionBatch(projectId, uris) },
+            afterSuccess = {
+                projectsOverviewRequested.value = false
+                selectedProjectId.value = projectId
+            },
+        )
     }
 
     private fun importSharedToProject(project: ApkProject, uris: List<Uri>) {
-        runBusyTask {
-            val summary = importRevisionBatch(project.id, uris)
-            pendingSharedUris.value = emptyList()
-            projectsOverviewRequested.value = false
-            selectedProjectId.value = project.id
-            summary
-        }
+        runBatchTask(
+            block = { importRevisionBatch(project.id, uris) },
+            afterSuccess = {
+                pendingSharedUris.value = emptyList()
+                projectsOverviewRequested.value = false
+                selectedProjectId.value = project.id
+            },
+        )
     }
 
     private fun createProjectFromShared(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        runBusyTask {
-            val baseResult = libraryStore.importBase(uris.first())
-            val projectId = baseResult.record.projectId
-            var addedRevisions = 0
-            var skipped = 0
-            var firstFailure: String? = null
-
-            for (uri in uris.drop(1)) {
-                runCatching { libraryStore.importRevision(projectId, uri) }
-                    .onSuccess { addedRevisions++ }
-                    .onFailure { failure ->
-                        skipped++
-                        if (firstFailure == null) firstFailure = failure.message
-                    }
-            }
-
-            pendingSharedUris.value = emptyList()
-            projectsOverviewRequested.value = false
-            selectedProjectId.value = projectId
-            buildString {
-                append("Project created · ${baseResult.record.label}")
-                if (addedRevisions > 0) append(" · $addedRevisions revision${if (addedRevisions == 1) "" else "s"} added")
-                if (skipped > 0) append(" · $skipped skipped")
-                if (skipped > 0 && firstFailure != null) append(" · $firstFailure")
-            }
-        }
+        runBatchTask(
+            block = {
+                val baseUri = uris.first()
+                val baseName = displayNameForUri(baseUri)
+                val baseResult = libraryStore.importBase(baseUri)
+                val reusedPercent = reusePercent(baseResult.record.sizeBytes, baseResult.reusedBytes)
+                val baseItem = BatchImportItem(
+                    displayName = baseName,
+                    status = BatchImportStatus.ADDED,
+                    detail = "Created project base · $reusedPercent% vault-wide reused",
+                    recordId = baseResult.record.id,
+                )
+                val remaining = if (uris.size > 1) importRevisionBatch(baseResult.record.projectId, uris.drop(1))
+                else BatchImportReport(baseResult.record.projectId, emptyList())
+                BatchImportReport(baseResult.record.projectId, listOf(baseItem) + remaining.items)
+            },
+            afterSuccess = { report ->
+                pendingSharedUris.value = emptyList()
+                projectsOverviewRequested.value = false
+                selectedProjectId.value = report.projectId
+            },
+        )
     }
 
-    private suspend fun importRevisionBatch(projectId: String, uris: List<Uri>): String {
-        var added = 0
-        var skipped = 0
-        var logicalBytes = 0L
-        var reusedBytes = 0L
-        var firstFailure: String? = null
+    private suspend fun importRevisionBatch(projectId: String, uris: List<Uri>): BatchImportReport {
+        val items = ArrayList<BatchImportItem>(uris.size)
         for (uri in uris) {
+            val displayName = displayNameForUri(uri)
             runCatching { libraryStore.importRevision(projectId, uri) }
                 .onSuccess { result ->
-                    added++
-                    logicalBytes += result.record.sizeBytes
-                    reusedBytes += result.reusedBytes
+                    items += BatchImportItem(
+                        displayName = displayName,
+                        status = BatchImportStatus.ADDED,
+                        detail = "Stored · ${reusePercent(result.record.sizeBytes, result.reusedBytes)}% vault-wide reused",
+                        recordId = result.record.id,
+                    )
                 }
                 .onFailure { failure ->
-                    skipped++
-                    if (firstFailure == null) firstFailure = failure.message
+                    val detail = failure.message?.takeIf { it.isNotBlank() }
+                        ?: "Import failed: ${failure::class.java.simpleName}"
+                    items += BatchImportItem(
+                        displayName = displayName,
+                        status = classifyImportFailure(detail),
+                        detail = detail,
+                    )
                 }
         }
-        if (added == 0) error(firstFailure ?: "No revisions were imported.")
-        val reusedPercent = if (logicalBytes == 0L) 0L
-        else (reusedBytes * 100L / logicalBytes).coerceIn(0L, 100L)
-        return buildString {
-            append("Saved $added revision")
-            if (added != 1) append('s')
-            append(" · $reusedPercent% reused across vault")
-            if (skipped > 0) append(" · $skipped skipped")
+        return BatchImportReport(projectId, items)
+    }
+
+    private fun classifyImportFailure(detail: String): BatchImportStatus = when {
+        detail.contains("already stored", ignoreCase = true) -> BatchImportStatus.ALREADY_STORED
+        detail.contains("belongs to", ignoreCase = true) && detail.contains("Choose the matching project", ignoreCase = true) -> BatchImportStatus.WRONG_PROJECT
+        else -> BatchImportStatus.FAILED
+    }
+
+    private fun reusePercent(sizeBytes: Long, reusedBytes: Long): Long =
+        if (sizeBytes <= 0L) 0L else (reusedBytes * 100L / sizeBytes).coerceIn(0L, 100L)
+
+    private fun displayNameForUri(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+        }
+    }.getOrNull()?.takeIf { !it.isNullOrBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        ?: "APK"
+
+    private fun runBatchTask(
+        block: suspend () -> BatchImportReport,
+        afterSuccess: (BatchImportReport) -> Unit = {},
+    ) {
+        if (busy.value) return
+        lifecycleScope.launch {
+            busy.value = true
+            message.value = null
+            try {
+                val report = block()
+                afterSuccess(report)
+                batchReport.value = report
+            } catch (t: Throwable) {
+                message.value = t.message?.takeIf { it.isNotBlank() }
+                    ?: "Batch import failed: ${t::class.java.simpleName}"
+            } finally {
+                busy.value = false
+            }
         }
     }
 
@@ -424,6 +482,60 @@ class MainActivity : ComponentActivity() {
             selectedProjectId.value = null
             projectsOverviewRequested.value = true
             "${project.name} deleted · globally shared chunks preserved"
+        }
+    }
+
+    private fun renameProject(project: ApkProject, newName: String) {
+        runBusyTask {
+            libraryStore.renameProject(project.id, newName)
+            "Project renamed to $newName"
+        }
+    }
+
+    private fun toggleStar(record: ApkRecord) {
+        runBusyTask {
+            libraryStore.setStarred(record.id, !record.starred)
+            if (record.starred) "Removed star from ${record.displayName}" else "Starred ${record.displayName}"
+        }
+    }
+
+    private fun updateRecordDetails(record: ApkRecord, description: String, notes: String) {
+        runBusyTask {
+            libraryStore.updateRecordDetails(record.id, description, notes)
+            "Description and notes saved"
+        }
+    }
+
+    private fun regenerateRecordIcon(record: ApkRecord) {
+        runBusyTask {
+            when (libraryStore.regenerateIcon(record.id)) {
+                IconRegenerationOutcome.UPDATED -> "Icon regenerated from ${record.displayName}"
+                IconRegenerationOutcome.UNCHANGED -> "Icon verified · already current"
+                IconRegenerationOutcome.FAILED -> "Android could not extract an icon from ${record.displayName}"
+            }
+        }
+    }
+
+    private fun regenerateAllIcons() {
+        if (busy.value) return
+        lifecycleScope.launch {
+            busy.value = true
+            try {
+                val summary = libraryStore.regenerateAllIcons()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Icons: ${summary.updated} updated · ${summary.unchanged} unchanged · ${summary.failed} failed",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } catch (t: Throwable) {
+                Toast.makeText(
+                    this@MainActivity,
+                    t.message ?: "Icon regeneration failed.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } finally {
+                busy.value = false
+            }
         }
     }
 
@@ -469,7 +581,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val shareDir = File(cacheDir, "share").apply { mkdirs() }
                 shareDir.listFiles()?.forEach {
-                    if (System.currentTimeMillis() - it.lastModified() > 60 * 60 * 1000L) it.delete()
+                    if (System.currentTimeMillis() - it.lastModified() > 5 * 60 * 1000L) it.delete()
                 }
                 val target = uniqueFile(shareDir, sanitizedApkName(record.displayName))
                 withContext(Dispatchers.IO) {

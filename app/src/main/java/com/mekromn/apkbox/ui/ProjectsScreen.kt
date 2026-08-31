@@ -19,9 +19,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -35,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -64,11 +65,13 @@ fun ProjectsScreen(
     onOpenProject: (ApkProject) -> Unit,
     onNewProject: () -> Unit,
     onCleanupApks: () -> Unit,
+    onRegenerateAllIcons: () -> Unit,
     onBackupVault: () -> Unit,
     onRestoreVault: () -> Unit,
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
+    var regenerateIconsRequested by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -94,6 +97,11 @@ fun ProjectsScreen(
                                 DropdownMenuItem(
                                     text = { Text("APK cleanup") },
                                     onClick = { menuOpen = false; onCleanupApks() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Regenerate all icons") },
+                                    enabled = !busy && records.isNotEmpty(),
+                                    onClick = { menuOpen = false; regenerateIconsRequested = true },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Free temporary install space") },
@@ -181,7 +189,7 @@ fun ProjectsScreen(
                                 shape = RoundedCornerShape(16.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer,
                             ) {
-                                Icon(Icons.Rounded.Android, null, Modifier.padding(13.dp).size(30.dp))
+                                StoredApkIcon(base, Modifier.padding(9.dp).size(38.dp), project.name)
                             }
                             Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
                                 Text(project.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -212,6 +220,24 @@ fun ProjectsScreen(
                 }
             }
         }
+    }
+
+    if (regenerateIconsRequested) {
+        AlertDialog(
+            onDismissRequest = { regenerateIconsRequested = false },
+            title = { Text("Regenerate all app icons?") },
+            text = {
+                Text("APKbox will reconstruct each stored APK one at a time, extract Android's declared application icon, then immediately delete the temporary APK before moving to the next build.")
+            },
+            confirmButton = {
+                TextButton(onClick = { regenerateIconsRequested = false; onRegenerateAllIcons() }) {
+                    Text("Regenerate all")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { regenerateIconsRequested = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
