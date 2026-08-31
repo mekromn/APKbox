@@ -36,6 +36,7 @@ class AutoScanActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        scanner.reloadFromDisk()
         scanner.scanAsync("Auto Scanner screen resume")
     }
 
