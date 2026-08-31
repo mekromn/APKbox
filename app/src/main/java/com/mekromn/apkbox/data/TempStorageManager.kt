@@ -5,7 +5,7 @@ import java.io.File
 
 /** Cleans full-size scratch APKs and APKbox-owned PackageInstaller staging sessions. */
 object TempStorageManager {
-    private const val SHARE_MAX_AGE_MS = 5L * 60L * 1000L
+    private const val SCRATCH_MAX_AGE_MS = 5L * 60L * 1000L
     private const val INSTALL_SESSION_MAX_AGE_MS = 10L * 60L * 1000L
 
     data class CleanupResult(
@@ -15,7 +15,7 @@ object TempStorageManager {
     )
 
     fun cleanupStartup(context: Context): CleanupResult {
-        val files = cleanupFiles(context, deleteAllImports = true, deleteAllShares = true)
+        val files = cleanupFiles(context, deleteAllScratch = true, deleteAllShares = true)
         return files.copy(
             installerSessionsAbandoned = abandonInstallerSessions(
                 context = context,
@@ -25,7 +25,7 @@ object TempStorageManager {
     }
 
     fun cleanupRoutine(context: Context): CleanupResult {
-        val files = cleanupFiles(context, deleteAllImports = false, deleteAllShares = false)
+        val files = cleanupFiles(context, deleteAllScratch = false, deleteAllShares = false)
         return files.copy(
             installerSessionsAbandoned = abandonInstallerSessions(
                 context = context,
@@ -36,7 +36,7 @@ object TempStorageManager {
 
     /** Explicit user-requested emergency cleanup. Cancels every still-pending APKbox install. */
     fun cleanupAll(context: Context): CleanupResult {
-        val files = cleanupFiles(context, deleteAllImports = true, deleteAllShares = true)
+        val files = cleanupFiles(context, deleteAllScratch = true, deleteAllShares = true)
         return files.copy(
             installerSessionsAbandoned = abandonInstallerSessions(
                 context = context,
@@ -59,7 +59,7 @@ object TempStorageManager {
 
     private fun cleanupFiles(
         context: Context,
-        deleteAllImports: Boolean,
+        deleteAllScratch: Boolean,
         deleteAllShares: Boolean,
     ): CleanupResult {
         val cache = context.applicationContext.cacheDir
@@ -77,16 +77,18 @@ object TempStorageManager {
         }
 
         cache.listFiles()?.forEach { file ->
-            if (file.isFile && file.name.startsWith("apkbox-import-") && file.name.endsWith(".apk")) {
-                // Normal imports delete these in finally. Anything left at process startup, or old
-                // enough during routine cleanup, is an interrupted/orphaned full APK copy.
-                if (deleteAllImports || now - file.lastModified() >= SHARE_MAX_AGE_MS) delete(file)
+            val apkboxScratch = file.isFile && file.name.endsWith(".apk") && (
+                file.name.startsWith("apkbox-import-") ||
+                    file.name.startsWith("apkbox-icon-")
+                )
+            if (apkboxScratch && (deleteAllScratch || now - file.lastModified() >= SCRATCH_MAX_AGE_MS)) {
+                delete(file)
             }
         }
 
         val shareDir = File(cache, "share")
         shareDir.listFiles()?.forEach { file ->
-            if (file.isFile && (deleteAllShares || now - file.lastModified() >= SHARE_MAX_AGE_MS)) {
+            if (file.isFile && (deleteAllShares || now - file.lastModified() >= SCRATCH_MAX_AGE_MS)) {
                 delete(file)
             }
         }

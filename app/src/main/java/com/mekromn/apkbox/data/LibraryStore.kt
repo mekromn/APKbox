@@ -6,6 +6,8 @@ import android.provider.OpenableColumns
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ChunkRef
+import com.mekromn.apkbox.model.IconRegenerationOutcome
+import com.mekromn.apkbox.model.IconRegenerationSummary
 import com.mekromn.apkbox.model.ImportResult
 import com.mekromn.apkbox.model.VaultStats
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +40,7 @@ class LibraryStore(context: Context) {
     private val appContext = context.applicationContext
     private val rootDir = File(appContext.filesDir, "apkbox-vault")
     private val manifestsDir = File(rootDir, "manifests")
+    private val iconsDir = File(rootDir, "icons")
     private val indexFile = File(rootDir, "library.json")
     private val projectsFile = File(rootDir, "projects.json")
     private val chunkStore = ChunkStore(File(rootDir, "chunks"))
@@ -55,6 +58,7 @@ class LibraryStore(context: Context) {
     init {
         rootDir.mkdirs()
         manifestsDir.mkdirs()
+        iconsDir.mkdirs()
         val loadedRecords = loadIndex()
         val repairedRecords = repairMetadataFromManifests(loadedRecords)
         val loadedProjects = loadProjects()
@@ -103,6 +107,7 @@ class LibraryStore(context: Context) {
 
         val sourceDisplayName = documentDisplayName(uri)
         val tempFile = File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
+        var createdRecordId: String? = null
         try {
             appContext.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tempFile).use { output -> input.copyTo(output, 256 * 1024) }
@@ -127,7 +132,8 @@ class LibraryStore(context: Context) {
             }
 
             val id = UUID.randomUUID().toString()
-            val record = ApkRecord(
+            createdRecordId = id
+            var record = ApkRecord(
                 id = id,
                 projectId = projectId,
                 displayName = sourceDisplayName ?: archive.label,
@@ -145,7 +151,7 @@ class LibraryStore(context: Context) {
             )
 
             writeManifest(record.id, chunking.chunks)
-            val updatedRecords = sortRecords(current + record)
+            var updatedRecords = sortRecords(current + record)
             val updatedProjects = if (isBase) {
                 val name = pendingProjectName?.trim().takeUnless { it.isNullOrBlank() } ?: archive.label
                 (_projects.value + ApkProject(
@@ -162,11 +168,25 @@ class LibraryStore(context: Context) {
             _records.value = updatedRecords
             _stats.value = calculateStats(updatedRecords)
 
+            // Icon caching is deliberately non-fatal: exact APK storage remains authoritative.
+            runCatching {
+                val iconBytes = ApkInspector.renderApplicationIconPng(appContext, tempFile)
+                if (iconBytes != null) {
+                    writeIconBytes(id, iconBytes)
+                    record = record.copy(iconUpdatedAtEpochMs = System.currentTimeMillis())
+                    updatedRecords = sortRecords(updatedRecords.map { if (it.id == id) record else it })
+                    saveIndex(updatedRecords)
+                    _records.value = updatedRecords
+                    _stats.value = calculateStats(updatedRecords)
+                }
+            }
+
             return ImportResult(
                 record = record,
                 reusedBytes = max(0L, record.sizeBytes - record.newBytesAdded),
             )
         } catch (t: Throwable) {
+            createdRecordId?.takeIf { id -> _records.value.none { it.id == id } }?.let { iconFile(it).delete() }
             garbageCollectInternal(_records.value)
             throw t
         } finally {
@@ -186,6 +206,74 @@ class LibraryStore(context: Context) {
         }
     }
 
+    suspend fun setStarred(recordId: String, starred: Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(_records.value.any { it.id == recordId }) { "Stored APK not found." }
+            val updated = sortRecords(_records.value.map {
+                if (it.id == recordId) it.copy(starred = starred) else it
+            })
+            saveIndex(updated)
+            _records.value = updated
+        }
+    }
+
+    suspend fun updateRecordDetails(recordId: String, description: String, notes: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(_records.value.any { it.id == recordId }) { "Stored APK not found." }
+            val updated = sortRecords(_records.value.map {
+                if (it.id == recordId) it.copy(
+                    description = description.trim(),
+                    notes = notes.trim(),
+                ) else it
+            })
+            saveIndex(updated)
+            _records.value = updated
+        }
+    }
+
+    suspend fun regenerateIcon(recordId: String): IconRegenerationOutcome = withContext(Dispatchers.IO) {
+        val record = _records.value.firstOrNull { it.id == recordId }
+            ?: return@withContext IconRegenerationOutcome.FAILED
+        val tempFile = File(appContext.cacheDir, "apkbox-icon-${UUID.randomUUID()}.apk")
+        try {
+            FileOutputStream(tempFile).use { output -> streamApk(record, output) }
+            val iconBytes = ApkInspector.renderApplicationIconPng(appContext, tempFile)
+                ?: return@withContext IconRegenerationOutcome.FAILED
+            val target = iconFile(recordId)
+            val unchanged = target.isFile && runCatching { target.readBytes().contentEquals(iconBytes) }.getOrDefault(false)
+            if (!unchanged) writeIconBytes(recordId, iconBytes)
+
+            mutex.withLock {
+                val updated = sortRecords(_records.value.map {
+                    if (it.id == recordId) it.copy(iconUpdatedAtEpochMs = System.currentTimeMillis()) else it
+                })
+                saveIndex(updated)
+                _records.value = updated
+                _stats.value = calculateStats(updated)
+            }
+            if (unchanged) IconRegenerationOutcome.UNCHANGED else IconRegenerationOutcome.UPDATED
+        } catch (_: Throwable) {
+            IconRegenerationOutcome.FAILED
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    suspend fun regenerateAllIcons(): IconRegenerationSummary = withContext(Dispatchers.IO) {
+        val ids = _records.value.map { it.id }
+        var updated = 0
+        var unchanged = 0
+        var failed = 0
+        for (id in ids) {
+            when (regenerateIcon(id)) {
+                IconRegenerationOutcome.UPDATED -> updated++
+                IconRegenerationOutcome.UNCHANGED -> unchanged++
+                IconRegenerationOutcome.FAILED -> failed++
+            }
+        }
+        IconRegenerationSummary(updated, unchanged, failed)
+    }
+
     suspend fun deleteRevision(recordId: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val record = _records.value.firstOrNull { it.id == recordId } ?: return@withLock
@@ -193,6 +281,7 @@ class LibraryStore(context: Context) {
 
             val updated = _records.value.filterNot { it.id == recordId }
             manifestFile(recordId).delete()
+            iconFile(recordId).delete()
             saveIndex(updated)
             _records.value = updated
             garbageCollectInternal(updated)
@@ -206,7 +295,10 @@ class LibraryStore(context: Context) {
             val removedRecords = _records.value.filter { it.projectId == projectId }
             val remainingRecords = _records.value.filterNot { it.projectId == projectId }
             val remainingProjects = _projects.value.filterNot { it.id == projectId }
-            removedRecords.forEach { manifestFile(it.id).delete() }
+            removedRecords.forEach {
+                manifestFile(it.id).delete()
+                iconFile(it.id).delete()
+            }
             saveIndex(remainingRecords)
             saveProjects(remainingProjects)
             _records.value = remainingRecords
@@ -221,6 +313,7 @@ class LibraryStore(context: Context) {
             rootDir.deleteRecursively()
             rootDir.mkdirs()
             manifestsDir.mkdirs()
+            iconsDir.mkdirs()
             _projects.value = emptyList()
             _records.value = emptyList()
             _stats.value = VaultStats()
@@ -272,9 +365,9 @@ class LibraryStore(context: Context) {
                 val repaired = _records.value.map {
                     if (it.id == record.id) it.copy(sizeBytes = expectedSize, chunkCount = chunks.size) else it
                 }
-                _records.value = repaired
-                saveIndex(repaired)
-                _stats.value = calculateStats(repaired)
+                _records.value = sortRecords(repaired)
+                saveIndex(_records.value)
+                _stats.value = calculateStats(_records.value)
             }
         }
     }
@@ -346,7 +439,7 @@ class LibraryStore(context: Context) {
     private fun saveIndex(records: List<ApkRecord>) {
         val array = JSONArray()
         records.forEach { record -> array.put(record.toJson()) }
-        val root = JSONObject().put("schema", 2).put("records", array)
+        val root = JSONObject().put("schema", 3).put("records", array)
         val temp = File(rootDir, ".library.json.tmp")
         FileOutputStream(temp).use { output ->
             output.write(root.toString().toByteArray(Charsets.UTF_8))
@@ -431,10 +524,23 @@ class LibraryStore(context: Context) {
     }.getOrNull()?.takeIf { it.isNotBlank() }
 
     private fun manifestFile(recordId: String) = File(manifestsDir, "$recordId.apkm")
+    private fun iconFile(recordId: String) = File(iconsDir, "$recordId.png")
+
+    private fun writeIconBytes(recordId: String, bytes: ByteArray) {
+        iconsDir.mkdirs()
+        val target = iconFile(recordId)
+        val temp = File(iconsDir, ".$recordId.png.tmp")
+        FileOutputStream(temp).use { output ->
+            output.write(bytes)
+            output.fd.sync()
+        }
+        atomicReplace(temp, target)
+    }
 
     private fun sortRecords(records: List<ApkRecord>): List<ApkRecord> = records.sortedWith(
         compareBy<ApkRecord> { it.projectId }
             .thenByDescending { it.isBase }
+            .thenByDescending { it.starred }
             .thenByDescending { it.addedAtEpochMs }
     )
 
@@ -475,6 +581,10 @@ class LibraryStore(context: Context) {
         .put("isBase", isBase)
         .put("chunkCount", chunkCount)
         .put("newBytesAdded", newBytesAdded)
+        .put("starred", starred)
+        .put("description", description)
+        .put("notes", notes)
+        .put("iconUpdatedAtEpochMs", iconUpdatedAtEpochMs)
 
     private fun JSONObject.toRecord(): ApkRecord = ApkRecord(
         id = getString("id"),
@@ -491,5 +601,9 @@ class LibraryStore(context: Context) {
         isBase = getBoolean("isBase"),
         chunkCount = optInt("chunkCount", 0),
         newBytesAdded = optLong("newBytesAdded", 0L),
+        starred = optBoolean("starred", false),
+        description = optString("description", ""),
+        notes = optString("notes", ""),
+        iconUpdatedAtEpochMs = optLong("iconUpdatedAtEpochMs", 0L),
     )
 }

@@ -1,9 +1,13 @@
 package com.mekromn.apkbox.data
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Build
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 
@@ -25,10 +29,7 @@ internal object ApkInspector {
     fun inspect(context: Context, apkFile: File): ArchiveInfo {
         val packageManager = context.packageManager
         val packageInfo = archivePackageInfo(packageManager, apkFile)
-        val applicationInfo = packageInfo.applicationInfo
-            ?: error("This APK does not contain application metadata.")
-        applicationInfo.sourceDir = apkFile.absolutePath
-        applicationInfo.publicSourceDir = apkFile.absolutePath
+        val applicationInfo = archiveApplicationInfo(packageInfo, apkFile)
 
         val label = runCatching {
             packageManager.getApplicationLabel(applicationInfo).toString()
@@ -42,6 +43,32 @@ internal object ApkInspector {
             signingCertSha256 = signingCertSha256(packageInfo),
         )
     }
+
+    /**
+     * Renders the icon actually declared by the archived APK's ApplicationInfo. We only display
+     * this cached PNG as an app icon when Android successfully resolves the APK resource itself;
+     * callers use a neutral placeholder when this returns null.
+     */
+    fun renderApplicationIconPng(context: Context, apkFile: File, sizePx: Int = 192): ByteArray? = runCatching {
+        val packageManager = context.packageManager
+        val packageInfo = archivePackageInfo(packageManager, apkFile)
+        val applicationInfo = archiveApplicationInfo(packageInfo, apkFile)
+        val drawable = packageManager.getApplicationIcon(applicationInfo)
+
+        val size = sizePx.coerceIn(96, 512)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val old = drawable.bounds
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+        drawable.setBounds(old.left, old.top, old.right, old.bottom)
+
+        ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            bitmap.recycle()
+            output.toByteArray()
+        }
+    }.getOrNull()
 
     fun inspectInstalled(context: Context, packageName: String): InstalledInfo? {
         val packageManager = context.packageManager
@@ -70,6 +97,14 @@ internal object ApkInspector {
         @Suppress("DEPRECATION")
         return packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
             ?: error("Android could not parse this APK.")
+    }
+
+    private fun archiveApplicationInfo(packageInfo: PackageInfo, apkFile: File): ApplicationInfo {
+        val applicationInfo = packageInfo.applicationInfo
+            ?: error("This APK does not contain application metadata.")
+        applicationInfo.sourceDir = apkFile.absolutePath
+        applicationInfo.publicSourceDir = apkFile.absolutePath
+        return applicationInfo
     }
 
     private fun signatureFlags(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
