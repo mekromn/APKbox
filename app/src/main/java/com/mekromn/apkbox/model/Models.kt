@@ -5,8 +5,16 @@ data class ChunkRef(
     val size: Int,
 )
 
+data class ApkProject(
+    val id: String,
+    val name: String,
+    val packageName: String,
+    val createdAtEpochMs: Long,
+)
+
 data class ApkRecord(
     val id: String,
+    val projectId: String,
     val displayName: String,
     val label: String,
     val packageName: String,
