@@ -16,7 +16,9 @@ class AutoScanDownloadReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                ApkBoxServices.autoScanner(context).scanNow("Android download complete")
+                val scanner = ApkBoxServices.autoScanner(context)
+                scanner.reloadFromDisk()
+                scanner.scanNow("Android download complete")
             } catch (_: Throwable) {
                 // Scanner failures are persisted as events where possible; never crash the receiver.
             } finally {
