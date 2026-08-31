@@ -5,6 +5,7 @@ import com.mekromn.apkbox.data.TempStorageManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ApkBoxApplication : Application() {
@@ -15,6 +16,7 @@ class ApkBoxApplication : Application() {
         // Cleanup and Auto Scanner catch-up are important, but neither may hold the first frame.
         startupScope.launch {
             runCatching { TempStorageManager.cleanupStartup(this@ApkBoxApplication) }
+            delay(900L)
             runCatching {
                 val scanner = ApkBoxServices.autoScanner(this@ApkBoxApplication)
                 scanner.reloadFromDisk()
