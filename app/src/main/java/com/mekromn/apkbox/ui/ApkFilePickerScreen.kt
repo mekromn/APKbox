@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ClearAll
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Folder
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storage
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -69,6 +69,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mekromn.apkbox.data.StoredApkMatcher
+import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -87,12 +89,12 @@ fun ApkFilePickerScreen(
     mode: ApkPickerMode,
     initialDirectory: File,
     hasDirectFileAccess: Boolean,
+    storedRecords: List<ApkRecord>,
     onRequestFileAccess: () -> Unit,
     onDismiss: () -> Unit,
     onPicked: (List<File>) -> Unit,
     onUseSystemPicker: () -> Unit,
 ) {
-    val context = LocalContext.current
     val storageRoot = remember {
         Environment.getExternalStorageDirectory().takeIf { it.isDirectory }
             ?: File("/storage/emulated/0")
@@ -106,14 +108,19 @@ fun ApkFilePickerScreen(
     var overflowOpen by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var directoryEntries by remember { mutableStateOf<List<File>>(emptyList()) }
+    var storedMatches by remember { mutableStateOf<Map<String, ApkRecord>>(emptyMap()) }
+    var checkingStored by remember { mutableStateOf(false) }
     var unreadable by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
+
+    val storedSizes = remember(storedRecords) { storedRecords.mapTo(hashSetOf()) { it.sizeBytes } }
 
     fun goTo(directory: File) {
         if (!directory.isDirectory) return
         currentDirectory = directory
         query = ""
         unreadable = false
+        selected = emptySet()
     }
 
     fun goUp() {
@@ -130,6 +137,7 @@ fun ApkFilePickerScreen(
     LaunchedEffect(currentDirectory.absolutePath, showHidden, sort, refreshKey, hasDirectFileAccess) {
         if (!hasDirectFileAccess) {
             directoryEntries = emptyList()
+            storedMatches = emptyMap()
             return@LaunchedEffect
         }
         val result = withContext(Dispatchers.IO) {
@@ -154,8 +162,26 @@ fun ApkFilePickerScreen(
             unreadable = false
         }.onFailure {
             directoryEntries = emptyList()
+            storedMatches = emptyMap()
             unreadable = true
         }
+    }
+
+    LaunchedEffect(directoryEntries, storedRecords, hasDirectFileAccess) {
+        if (!hasDirectFileAccess || directoryEntries.isEmpty() || storedRecords.isEmpty()) {
+            storedMatches = emptyMap()
+            checkingStored = false
+            return@LaunchedEffect
+        }
+
+        val apkFiles = directoryEntries.filter { it.isFile }
+        checkingStored = apkFiles.any { it.length() in storedSizes }
+        val matches = withContext(Dispatchers.IO) {
+            StoredApkMatcher.findMatches(apkFiles, storedRecords)
+        }
+        storedMatches = matches
+        if (matches.isNotEmpty()) selected = selected - matches.keys
+        checkingStored = false
     }
 
     val visibleEntries = remember(directoryEntries, query) {
@@ -163,8 +189,11 @@ fun ApkFilePickerScreen(
         else directoryEntries.filter { it.name.contains(query, ignoreCase = true) }
     }
     val apkEntries = remember(directoryEntries) { directoryEntries.filter { it.isFile } }
-    val selectedFiles = remember(selected, directoryEntries) {
-        selected.map(::File).filter { it.isFile }
+    val selectableApks = remember(apkEntries, storedMatches) {
+        apkEntries.filterNot { it.absolutePath in storedMatches }
+    }
+    val selectedFiles = remember(selected, directoryEntries, storedMatches) {
+        selected.map(::File).filter { it.isFile && it.absolutePath !in storedMatches }
     }
 
     Scaffold(
@@ -294,24 +323,40 @@ fun ApkFilePickerScreen(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            "${apkEntries.size} APK${if (apkEntries.size == 1) "" else "s"}",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        TextButton(onClick = {
-                            val allPaths = apkEntries.mapTo(linkedSetOf()) { it.absolutePath }
-                            selected = if (selected.containsAll(allPaths)) emptySet() else allPaths
-                        }) {
-                            Icon(
-                                if (selected.containsAll(apkEntries.map { it.absolutePath })) Icons.Rounded.ClearAll
-                                else Icons.Rounded.CheckBox,
-                                null,
-                                Modifier.size(18.dp),
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${apkEntries.size} APK${if (apkEntries.size == 1) "" else "s"}",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Spacer(Modifier.size(6.dp))
-                            Text(if (selected.containsAll(apkEntries.map { it.absolutePath })) "Clear" else "Select all")
+                            if (checkingStored) {
+                                Text(
+                                    "Checking for builds already in your vault…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else if (storedMatches.isNotEmpty()) {
+                                Text(
+                                    "${storedMatches.size} already stored",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        if (selectableApks.isNotEmpty()) {
+                            TextButton(onClick = {
+                                val allPaths = selectableApks.mapTo(linkedSetOf()) { it.absolutePath }
+                                selected = if (selected.containsAll(allPaths)) emptySet() else allPaths
+                            }) {
+                                Icon(
+                                    if (selected.containsAll(selectableApks.map { it.absolutePath })) Icons.Rounded.ClearAll
+                                    else Icons.Rounded.CheckBox,
+                                    null,
+                                    Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.size(6.dp))
+                                Text(if (selected.containsAll(selectableApks.map { it.absolutePath })) "Clear" else "Select new")
+                            }
                         }
                     }
                 }
@@ -332,15 +377,19 @@ fun ApkFilePickerScreen(
                     )
                 }
                 else -> items(visibleEntries, key = { it.absolutePath }) { file ->
+                    val storedRecord = storedMatches[file.absolutePath]
                     val isSelected = file.absolutePath in selected
+                    val mayBeChecking = checkingStored && file.isFile && file.length() in storedSizes && storedRecord == null
                     FileRow(
                         file = file,
                         selected = isSelected,
                         multiSelect = mode == ApkPickerMode.REVISIONS,
+                        storedRecord = storedRecord,
+                        checkingStored = mayBeChecking,
                         onClick = {
                             if (file.isDirectory) {
                                 goTo(file)
-                            } else {
+                            } else if (storedRecord == null && !mayBeChecking) {
                                 selected = if (mode == ApkPickerMode.BASE) {
                                     setOf(file.absolutePath)
                                 } else if (isSelected) {
@@ -434,15 +483,21 @@ private fun FileRow(
     file: File,
     selected: Boolean,
     multiSelect: Boolean,
+    storedRecord: ApkRecord?,
+    checkingStored: Boolean,
     onClick: () -> Unit,
 ) {
     val context = LocalContext.current
+    val selectable = file.isDirectory || (storedRecord == null && !checkingStored)
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clickable(enabled = selectable, onClick = onClick),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
-            else MaterialTheme.colorScheme.surfaceContainerLow,
+            containerColor = when {
+                storedRecord != null -> MaterialTheme.colorScheme.surfaceContainerHighest
+                selected -> MaterialTheme.colorScheme.secondaryContainer
+                else -> MaterialTheme.colorScheme.surfaceContainerLow
+            },
         ),
     ) {
         Row(
@@ -468,19 +523,48 @@ private fun FileRow(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    when {
+                        storedRecord != null -> Text(
+                            if (storedRecord.isBase) "Already stored as base · ${storedRecord.displayName}"
+                            else "Already stored · ${storedRecord.displayName}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        checkingStored -> Text(
+                            "Checking vault…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 } else {
                     Text("Folder", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (file.isFile) {
-                Icon(
-                    if (selected) Icons.Rounded.CheckBox else Icons.Rounded.CheckBoxOutlineBlank,
-                    contentDescription = if (selected) "Selected" else "Not selected",
-                    tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (!multiSelect && selected) {
-                    Spacer(Modifier.size(2.dp))
+                when {
+                    storedRecord != null -> Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Rounded.CheckCircle, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.size(4.dp))
+                            Text("Stored", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    checkingStored -> Text("…", style = MaterialTheme.typography.titleMedium)
+                    else -> Icon(
+                        if (selected) Icons.Rounded.CheckBox else Icons.Rounded.CheckBoxOutlineBlank,
+                        contentDescription = if (selected) "Selected" else "Not selected",
+                        tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
+                if (!multiSelect && selected) Spacer(Modifier.size(2.dp))
             }
         }
     }
