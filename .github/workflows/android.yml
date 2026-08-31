@@ -3,9 +3,11 @@ name: Build APKbox
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: apkbox-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -35,6 +37,15 @@ jobs:
       - name: Install Android 16 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+      # A fresh GitHub runner would otherwise create a new debug key. Keeping this cache private
+      # to trusted main/workflow_dispatch builds makes APKbox updates install over prior APKbox
+      # builds without committing a signing private key to this public repository.
+      - name: Restore APKbox development signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: apkbox-development-signing-v1
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
@@ -44,3 +55,4 @@ jobs:
           name: APKbox-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 30
