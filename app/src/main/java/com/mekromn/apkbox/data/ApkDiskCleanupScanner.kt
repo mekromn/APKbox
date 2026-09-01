@@ -1,17 +1,25 @@
 package com.mekromn.apkbox.data
 
+import android.content.ContentUris
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import com.mekromn.apkbox.model.ApkRecord
 import java.io.File
+import java.io.FileInputStream
+import java.io.InputStream
+import java.security.MessageDigest
 
 /**
  * Finds APK files in shared storage and identifies exact byte-for-byte copies already stored in
- * APKbox. Matching is SHA-256 based; filename, package metadata, and version code are never used as
- * proof that a disk copy is safely recoverable from the vault.
+ * APKbox. Matching is always SHA-256 based; filename, package metadata, version code, and file size
+ * are only discovery/prefilter hints and are never proof that a disk copy is safely recoverable.
  *
- * Shared-storage faults are isolated to the affected directory/file. One flaky FUSE/provider node
- * must never collapse the complete cleanup scan into a false zero-result state.
+ * On Android 10+ the cleanup path prefers MediaStore content streams for indexed APKs, while still
+ * merging direct-filesystem discovery so unindexed files are not lost. This avoids making the whole
+ * feature depend on one flaky direct FUSE path.
  */
 object ApkDiskCleanupScanner {
     data class Candidate(
@@ -38,12 +46,61 @@ object ApkDiskCleanupScanner {
         val bytesReclaimed: Long,
     )
 
-    fun scan(root: File, records: List<ApkRecord>): ScanResult {
-        if (!runCatching { root.isDirectory }.getOrDefault(false)) {
-            return ScanResult(emptyList(), 0, 1, 0)
+    private data class Source(
+        val key: String,
+        val path: String,
+        val name: String,
+        val sizeBytes: Long,
+        val modifiedAtEpochMs: Long,
+        val openStream: () -> InputStream?,
+    )
+
+    private data class Discovery(
+        val sources: List<Source>,
+        val directoriesVisited: Int,
+        val unreadableDirectories: Int,
+    )
+
+    /** Android-aware scan used by the app. */
+    fun scan(context: Context, root: File, records: List<ApkRecord>): ScanResult {
+        val direct = discoverDirect(root)
+        val merged = LinkedHashMap<String, Source>()
+
+        // Prefer MediaStore streams when available. All-files-access gives APKbox access to the
+        // MediaStore.Files table, and content streams avoid relying exclusively on direct FUSE I/O.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            discoverMediaStore(context).forEach { source -> merged[source.key] = source }
         }
 
-        val apkFiles = ArrayList<File>()
+        // Fill any MediaStore gaps with direct-path discoveries. If the same primary-storage path
+        // exists in both sources, the MediaStore-backed stream already won above.
+        direct.sources.forEach { source -> merged.putIfAbsent(source.key, source) }
+
+        return matchSources(
+            sources = merged.values.toList(),
+            records = records,
+            directoriesVisited = direct.directoriesVisited,
+            unreadableDirectories = direct.unreadableDirectories,
+        )
+    }
+
+    /** Pure file scan retained for JVM tests and pre-Android-10 fallback. */
+    fun scan(root: File, records: List<ApkRecord>): ScanResult {
+        val direct = discoverDirect(root)
+        return matchSources(
+            sources = direct.sources,
+            records = records,
+            directoriesVisited = direct.directoriesVisited,
+            unreadableDirectories = direct.unreadableDirectories,
+        )
+    }
+
+    private fun discoverDirect(root: File): Discovery {
+        if (!runCatching { root.isDirectory }.getOrDefault(false)) {
+            return Discovery(emptyList(), 0, 1)
+        }
+
+        val sources = ArrayList<Source>()
         val stack = ArrayDeque<File>()
         val seenDirectories = HashSet<String>()
         stack.add(root)
@@ -61,11 +118,7 @@ object ApkDiskCleanupScanner {
             if (!seenDirectories.add(canonical)) continue
             visited++
 
-            val children = try {
-                directory.listFiles()
-            } catch (_: Throwable) {
-                null
-            }
+            val children = runCatching { directory.listFiles() }.getOrNull()
             if (children == null) {
                 unreadableDirectories++
                 continue
@@ -75,30 +128,149 @@ object ApkDiskCleanupScanner {
                 runCatching {
                     when {
                         file.isDirectory -> stack.add(file)
-                        file.isFile && file.extension.equals("apk", ignoreCase = true) -> apkFiles += file
+                        file.isFile && file.extension.equals("apk", ignoreCase = true) -> {
+                            val path = file.absolutePath
+                            sources += Source(
+                                key = path,
+                                path = path,
+                                name = file.name,
+                                sizeBytes = file.length(),
+                                modifiedAtEpochMs = file.lastModified(),
+                                openStream = { FileInputStream(file) },
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // StoredApkMatcher hashes only files whose size could match a vault record, so scanning a
-        // folder full of unrelated APKs does not needlessly hash every file. Hash/read failures are
-        // returned per-file and never abort the rest of the match pass.
-        val matchResult = StoredApkMatcher.findMatchesDetailed(apkFiles, records)
-        val candidates = apkFiles
-            .asSequence()
-            .mapNotNull { file ->
-                runCatching {
-                    Candidate(
-                        path = file.absolutePath,
-                        name = file.name,
-                        sizeBytes = file.length(),
-                        modifiedAtEpochMs = file.lastModified(),
-                        storedRecord = matchResult.matches[file.absolutePath],
-                        hashReadFailed = file.absolutePath in matchResult.unreadablePaths,
+        return Discovery(sources, visited, unreadableDirectories)
+    }
+
+    private fun discoverMediaStore(context: Context): List<Source> {
+        val resolver = context.applicationContext.contentResolver
+        val primaryRoot = Environment.getExternalStorageDirectory()
+        val result = LinkedHashMap<String, Source>()
+        val volumes = runCatching { MediaStore.getExternalVolumeNames(context) }
+            .getOrDefault(setOf(MediaStore.VOLUME_EXTERNAL_PRIMARY))
+
+        volumes.forEach { volume ->
+            val table = MediaStore.Files.getContentUri(volume)
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.SIZE,
+                MediaStore.MediaColumns.DATE_MODIFIED,
+                MediaStore.MediaColumns.RELATIVE_PATH,
+            )
+            val cursor = runCatching {
+                resolver.query(
+                    table,
+                    projection,
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+                    arrayOf("%.apk"),
+                    null,
+                )
+            }.getOrNull() ?: return@forEach
+
+            cursor.use { rows ->
+                val idColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val nameColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                val sizeColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                val modifiedColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                val relativeColumn = rows.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+
+                while (rows.moveToNext()) {
+                    val id = rows.getLong(idColumn)
+                    val name = rows.getString(nameColumn) ?: continue
+                    if (!name.endsWith(".apk", ignoreCase = true)) continue
+                    val size = rows.getLong(sizeColumn).coerceAtLeast(0L)
+                    val modified = rows.getLong(modifiedColumn).coerceAtLeast(0L) * 1000L
+                    val contentUri = ContentUris.withAppendedId(table, id)
+                    val relative = if (relativeColumn >= 0 && !rows.isNull(relativeColumn)) {
+                        rows.getString(relativeColumn).orEmpty()
+                    } else ""
+                    val path = if (volume == MediaStore.VOLUME_EXTERNAL_PRIMARY) {
+                        File(primaryRoot, relative + name).absolutePath
+                    } else {
+                        contentUri.toString()
+                    }
+                    val key = path.lowercase()
+                    result[key] = Source(
+                        key = key,
+                        path = path,
+                        name = name,
+                        sizeBytes = size,
+                        modifiedAtEpochMs = modified,
+                        openStream = { resolver.openInputStream(contentUri) },
                     )
-                }.getOrNull()
+                }
             }
+        }
+        return result.values.toList()
+    }
+
+    private fun matchSources(
+        sources: List<Source>,
+        records: List<ApkRecord>,
+        directoriesVisited: Int,
+        unreadableDirectories: Int,
+    ): ScanResult {
+        if (sources.isEmpty()) {
+            return ScanResult(emptyList(), directoriesVisited, unreadableDirectories, 0)
+        }
+
+        val recordsByHash = records.associateBy { it.sha256.lowercase() }
+        val recordsBySize = records.groupBy { it.sizeBytes }
+        val recordsByName = records.groupBy { it.displayName.lowercase() }
+        val matches = HashMap<String, ApkRecord>()
+        val unreadable = LinkedHashSet<String>()
+        val hashes = HashMap<String, String>()
+
+        // Fast pass: hash only sources whose size OR exact original filename points at a vault
+        // record. Filename/size are never trusted as proof; they only decide what to hash first.
+        sources.forEach { source ->
+            val worthHashing = recordsBySize.containsKey(source.sizeBytes) ||
+                recordsByName.containsKey(source.name.lowercase())
+            if (!worthHashing) return@forEach
+            val hash = sha256OrNull(source.openStream)
+            if (hash == null) {
+                unreadable += source.key
+                return@forEach
+            }
+            hashes[source.key] = hash
+            recordsByHash[hash]?.let { matches[source.key] = it }
+        }
+
+        // Recovery pass: if the optimized metadata pass found ZERO stored APKs, do not report a
+        // false zero. Hash every remaining source and compare directly against the authoritative
+        // vault SHA-256 set. This is slower, but Cleanup correctness is more important than trusting
+        // stale size metadata.
+        if (matches.isEmpty() && recordsByHash.isNotEmpty()) {
+            sources.forEach { source ->
+                if (source.key in hashes || source.key in unreadable) return@forEach
+                val hash = sha256OrNull(source.openStream)
+                if (hash == null) {
+                    unreadable += source.key
+                    return@forEach
+                }
+                hashes[source.key] = hash
+                recordsByHash[hash]?.let { matches[source.key] = it }
+            }
+        }
+
+        val candidates = sources
+            .map { source ->
+                Candidate(
+                    path = source.path,
+                    name = source.name,
+                    sizeBytes = source.sizeBytes,
+                    modifiedAtEpochMs = source.modifiedAtEpochMs,
+                    storedRecord = matches[source.key],
+                    hashReadFailed = source.key in unreadable,
+                )
+            }
+            .distinctBy { it.path.lowercase() }
             .sortedWith(
                 compareByDescending<Candidate> { it.isSafelyStored }
                     .thenBy { it.hashReadFailed }
@@ -106,17 +278,32 @@ object ApkDiskCleanupScanner {
                     .thenBy { it.name.lowercase() }
                     .thenBy { it.path.lowercase() }
             )
-            .toList()
 
-        val unreadableFiles = matchResult.unreadablePaths.size
         return ScanResult(
             candidates = candidates,
-            directoriesVisited = visited,
-            // Existing cleanup UI already displays this field. Include unreadable APKs here too so
-            // the user immediately sees that the scan skipped something instead of a false clean bill.
-            unreadableDirectories = unreadableDirectories + unreadableFiles,
-            unreadableFiles = unreadableFiles,
+            directoriesVisited = directoriesVisited,
+            unreadableDirectories = unreadableDirectories,
+            unreadableFiles = unreadable.size,
         )
+    }
+
+    private fun sha256OrNull(openStream: () -> InputStream?): String? {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val input = runCatching { openStream() }.getOrNull() ?: return null
+        return try {
+            val buffer = ByteArray(512 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count > 0) digest.update(buffer, 0, count)
+            }
+            digest.digest().toHex()
+        } catch (_: Throwable) {
+            null
+        } finally {
+            // A close-only EIO after a successful full read must not invalidate the digest.
+            runCatching { input.close() }
+        }
     }
 
     fun delete(context: Context, paths: Collection<String>): DeleteResult {
@@ -139,7 +326,6 @@ object ApkDiskCleanupScanner {
             }
         }
 
-        // Ask MediaStore to discard stale metadata/thumbnails for paths that were physically removed.
         if (deleted.isNotEmpty()) {
             runCatching {
                 MediaScannerConnection.scanFile(
