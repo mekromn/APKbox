@@ -16,6 +16,10 @@ import java.security.MessageDigest
 import kotlin.random.Random
 
 class FastApkStagerTest {
+    companion object {
+        private const val INSTALL_STYLE_BUFFER = 4 * 1024 * 1024
+    }
+
     @Test
     fun parallelVaultAndPreparedSourceStageIdenticalExactBytes() {
         runBlocking {
@@ -49,17 +53,21 @@ class FastApkStagerTest {
                 assertEquals(exactBytes.size.toLong(), plan.exactSize)
 
                 val vaultProgress = ArrayList<FastApkStager.Progress>()
-                val vaultOutput = ByteArrayOutputStream(exactBytes.size)
+                val vaultRaw = ByteArrayOutputStream(exactBytes.size)
+                val vaultOutput = BufferedOutputStream(vaultRaw, INSTALL_STYLE_BUFFER)
                 stager.stageVault(record, plan, vaultOutput) { vaultProgress += it }
-                assertArrayEquals(exactBytes, vaultOutput.toByteArray())
+                vaultOutput.flush()
+                assertArrayEquals(exactBytes, vaultRaw.toByteArray())
                 assertEquals(exactBytes.size.toLong(), vaultProgress.last().bytesWritten)
                 assertEquals(FastApkStager.Source.VAULT, vaultProgress.last().source)
 
                 val preparedFile = File(root, "prepared.apk").apply { writeBytes(exactBytes) }
                 val directProgress = ArrayList<FastApkStager.Progress>()
-                val directOutput = ByteArrayOutputStream(exactBytes.size)
+                val directRaw = ByteArrayOutputStream(exactBytes.size)
+                val directOutput = BufferedOutputStream(directRaw, INSTALL_STYLE_BUFFER)
                 stager.stagePreparedFile(record, plan, preparedFile, directOutput) { directProgress += it }
-                assertArrayEquals(exactBytes, directOutput.toByteArray())
+                directOutput.flush()
+                assertArrayEquals(exactBytes, directRaw.toByteArray())
                 assertEquals(exactBytes.size.toLong(), directProgress.last().bytesWritten)
                 assertEquals(FastApkStager.Source.PREPARED_FILE, directProgress.last().source)
 
