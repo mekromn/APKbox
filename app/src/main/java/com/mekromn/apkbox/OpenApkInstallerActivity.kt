@@ -201,12 +201,20 @@ class OpenApkInstallerActivity : ComponentActivity() {
                 val preparedUri = Uri.fromFile(prepared.file)
                 val record = withContext(Dispatchers.IO) {
                     if (projectChoice == OPEN_INSTALLER_NEW_PROJECT) {
-                        libraryStore.importBase(preparedUri, incoming.label).record
+                        libraryStore.importBase(
+                            uri = preparedUri,
+                            projectName = incoming.label,
+                            displayNameOverride = incoming.displayName,
+                        ).record
                     } else {
                         val alreadyHere = libraryStore.records.value.firstOrNull {
                             it.projectId == projectChoice && it.sha256 == incoming.sha256
                         }
-                        alreadyHere ?: libraryStore.importRevision(projectChoice, preparedUri).record
+                        alreadyHere ?: libraryStore.importRevision(
+                            projectId = projectChoice,
+                            uri = preparedUri,
+                            displayNameOverride = incoming.displayName,
+                        ).record
                     }
                 }
                 check(record.sha256 == incoming.sha256) {
