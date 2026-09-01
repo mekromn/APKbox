@@ -139,12 +139,15 @@ internal class ChunkStore(private val chunksDir: File) {
 
     fun garbageCollect(referencedHashes: Set<String>) {
         if (!chunksDir.exists()) return
-        chunksDir.walkBottomUp().forEach { file ->
-            when {
-                file.isFile && file.extension == "chunk" -> {
-                    if (file.nameWithoutExtension !in referencedHashes) file.delete()
+        val vaultRoot = chunksDir.parentFile ?: chunksDir
+        VaultChunkClaims.withGarbageCollection(vaultRoot, referencedHashes) { protectedHashes ->
+            chunksDir.walkBottomUp().forEach { file ->
+                when {
+                    file.isFile && file.extension == "chunk" -> {
+                        if (file.nameWithoutExtension !in protectedHashes) file.delete()
+                    }
+                    file.isDirectory && file != chunksDir && file.listFiles().isNullOrEmpty() -> file.delete()
                 }
-                file.isDirectory && file != chunksDir && file.listFiles().isNullOrEmpty() -> file.delete()
             }
         }
     }
