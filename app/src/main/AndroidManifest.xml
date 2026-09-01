@@ -37,6 +37,26 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Transient package-manager-style path: open an APK with APKbox, choose a Project,
+          archive/verify it, then hand off to Android's normal install confirmation. This activity
+          never opens MainActivity and is intentionally excluded from Recents.
+        -->
+        <activity
+            android:name=".OpenApkInstallerActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:screenOrientation="unspecified">
+            <intent-filter android:label="Archive &amp; install with APKbox">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:mimeType="application/vnd.android.package-archive" />
+                <data android:scheme="file" android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".AutoScanActivity"
             android:exported="false"
