@@ -21,6 +21,7 @@ internal data class SharedApkPreview(
     val sizeBytes: Long,
     val sha256: String,
     val storedMatches: List<ApkRecord>,
+    val iconPng: ByteArray? = null,
 )
 
 internal object SharedApkAnalyzer {
@@ -54,10 +55,11 @@ internal object SharedApkAnalyzer {
                     }
                     output.fd.sync()
                 }
-            } ?: error("A shared APK could not be opened.")
+            } ?: error("The APK could not be opened.")
 
-            require(size > 0L) { "A shared APK is empty." }
+            require(size > 0L) { "The APK is empty." }
             val archive = ApkInspector.inspect(context, temp)
+            val iconPng = ApkInspector.renderApplicationIconPng(context, temp)
             val sha = digest.digest().toHex()
             return SharedApkPreview(
                 uri = uri,
@@ -69,6 +71,7 @@ internal object SharedApkAnalyzer {
                 sizeBytes = size,
                 sha256 = sha,
                 storedMatches = records.filter { it.sha256 == sha },
+                iconPng = iconPng,
             )
         } finally {
             temp.delete()
