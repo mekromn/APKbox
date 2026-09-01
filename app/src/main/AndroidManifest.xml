@@ -46,7 +46,6 @@
             android:name=".OpenApkInstallerActivity"
             android:exported="true"
             android:excludeFromRecents="true"
-            android:noHistory="true"
             android:screenOrientation="unspecified">
             <intent-filter android:label="Archive &amp; install with APKbox">
                 <action android:name="android.intent.action.VIEW" />
