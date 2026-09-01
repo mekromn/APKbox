@@ -26,10 +26,11 @@ internal object GatewaySourceClaims {
         var closed = false
         return Closeable {
             synchronized(lock) {
-                if (closed) return@Closeable
-                closed = true
-                val remaining = (counts[key] ?: 1) - 1
-                if (remaining <= 0) counts.remove(key) else counts[key] = remaining
+                if (!closed) {
+                    closed = true
+                    val remaining = (counts[key] ?: 1) - 1
+                    if (remaining <= 0) counts.remove(key) else counts[key] = remaining
+                }
             }
         }
     }
