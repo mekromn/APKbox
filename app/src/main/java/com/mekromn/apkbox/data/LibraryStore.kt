@@ -138,15 +138,27 @@ class LibraryStore(context: Context) {
         val existingProject = _projects.value.firstOrNull { it.id == projectId }
         if (!isBase) require(existingProject != null) { "Choose a project first." }
 
-        val sourceDisplayName = documentDisplayName(uri)
-        val tempFile = File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
+        // Gateway and Auto Scanner already own stable File objects. Reading those directly removes
+        // a redundant full-APK cache copy. Content-provider URIs still use the snapshot temp path,
+        // preserving compatibility with Files/Downloads/providers whose streams are ephemeral.
+        val directSource = if (uri.scheme.equals("file", ignoreCase = true)) {
+            uri.path?.let(::File)?.takeIf { it.isFile && it.canRead() }
+        } else null
+        val ownsSnapshot = directSource == null
+        val sourceFile = directSource ?: File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
+        val sourceDisplayName = directSource?.name ?: documentDisplayName(uri)
+        val directSizeBefore = directSource?.length() ?: -1L
+        val directModifiedBefore = directSource?.lastModified() ?: -1L
+
         var createdRecordId: String? = null
         try {
-            appContext.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use { output -> input.copyTo(output, 256 * 1024) }
-            } ?: error("The selected APK could not be opened.")
+            if (ownsSnapshot) {
+                appContext.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(sourceFile).use { output -> input.copyTo(output, 1024 * 1024) }
+                } ?: error("The selected APK could not be opened.")
+            }
 
-            val archive = ApkInspector.inspect(appContext, tempFile)
+            val archive = ApkInspector.inspect(appContext, sourceFile)
             if (!isBase && existingProject != null && archive.packageName != existingProject.packageName) {
                 error(
                     "This APK belongs to ${archive.packageName}, but ${existingProject.name} contains " +
@@ -154,13 +166,27 @@ class LibraryStore(context: Context) {
                 )
             }
 
-            val chunking = chunkStore.ingest(tempFile)
+            val chunking = chunkStore.ingest(sourceFile)
+
+            // Direct external sources are read in place, so reject a file that was actively changing
+            // while chunking rather than storing an unstable snapshot. Gateway scratch is app-owned
+            // and naturally remains stable; Auto Scanner also benefits from this explicit guard.
+            if (directSource != null) {
+                check(
+                    directSource.isFile &&
+                        directSource.length() == directSizeBefore &&
+                        directSource.lastModified() == directModifiedBefore
+                ) {
+                    "The APK changed while APKbox was reading it. Original kept; try again after the download finishes."
+                }
+            }
+
             if (current.any { it.projectId == projectId && it.sha256 == chunking.apkSha256 }) {
                 error("That exact APK is already stored in this project.")
             }
 
             val authoritativeSize = chunking.chunks.sumOf { it.size.toLong() }
-            check(authoritativeSize == tempFile.length()) {
+            check(authoritativeSize == sourceFile.length()) {
                 "Import size verification failed before the APK was stored."
             }
 
@@ -202,7 +228,7 @@ class LibraryStore(context: Context) {
 
             // Icon caching is deliberately non-fatal: exact APK storage remains authoritative.
             runCatching {
-                val iconBytes = ApkInspector.renderApplicationIconPng(appContext, tempFile)
+                val iconBytes = ApkInspector.renderApplicationIconPng(appContext, sourceFile)
                 if (iconBytes != null) {
                     writeIconBytes(id, iconBytes)
                     record = record.copy(iconUpdatedAtEpochMs = System.currentTimeMillis())
@@ -223,7 +249,7 @@ class LibraryStore(context: Context) {
             scheduleStatsRefresh()
             throw t
         } finally {
-            tempFile.delete()
+            if (ownsSnapshot) sourceFile.delete()
         }
     }
 
