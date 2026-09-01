@@ -61,19 +61,14 @@ object ApkDiskCleanupScanner {
         val unreadableDirectories: Int,
     )
 
-    /** Android-aware scan used by the app. */
     fun scan(context: Context, root: File, records: List<ApkRecord>): ScanResult {
         val direct = discoverDirect(root)
         val merged = LinkedHashMap<String, Source>()
 
-        // Prefer MediaStore streams when available. All-files-access gives APKbox access to the
-        // MediaStore.Files table, and content streams avoid relying exclusively on direct FUSE I/O.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             discoverMediaStore(context).forEach { source -> merged[source.key] = source }
         }
 
-        // Fill any MediaStore gaps with direct-path discoveries. If the same primary-storage path
-        // exists in both sources, the MediaStore-backed stream already won above.
         direct.sources.forEach { source -> merged.putIfAbsent(source.key, source) }
 
         return matchSources(
@@ -84,7 +79,6 @@ object ApkDiskCleanupScanner {
         )
     }
 
-    /** Pure file scan retained for JVM tests and pre-Android-10 fallback. */
     fun scan(root: File, records: List<ApkRecord>): ScanResult {
         val direct = discoverDirect(root)
         return matchSources(
@@ -130,8 +124,9 @@ object ApkDiskCleanupScanner {
                         file.isDirectory -> stack.add(file)
                         file.isFile && file.extension.equals("apk", ignoreCase = true) -> {
                             val path = file.absolutePath
+                            val key = path.lowercase()
                             sources += Source(
-                                key = path,
+                                key = key,
                                 path = path,
                                 name = file.name,
                                 sizeBytes = file.length(),
@@ -227,8 +222,6 @@ object ApkDiskCleanupScanner {
         val unreadable = LinkedHashSet<String>()
         val hashes = HashMap<String, String>()
 
-        // Fast pass: hash only sources whose size OR exact original filename points at a vault
-        // record. Filename/size are never trusted as proof; they only decide what to hash first.
         sources.forEach { source ->
             val worthHashing = recordsBySize.containsKey(source.sizeBytes) ||
                 recordsByName.containsKey(source.name.lowercase())
@@ -242,10 +235,6 @@ object ApkDiskCleanupScanner {
             recordsByHash[hash]?.let { matches[source.key] = it }
         }
 
-        // Recovery pass: if the optimized metadata pass found ZERO stored APKs, do not report a
-        // false zero. Hash every remaining source and compare directly against the authoritative
-        // vault SHA-256 set. This is slower, but Cleanup correctness is more important than trusting
-        // stale size metadata.
         if (matches.isEmpty() && recordsByHash.isNotEmpty()) {
             sources.forEach { source ->
                 if (source.key in hashes || source.key in unreadable) return@forEach
@@ -301,7 +290,6 @@ object ApkDiskCleanupScanner {
         } catch (_: Throwable) {
             null
         } finally {
-            // A close-only EIO after a successful full read must not invalidate the digest.
             runCatching { input.close() }
         }
     }
