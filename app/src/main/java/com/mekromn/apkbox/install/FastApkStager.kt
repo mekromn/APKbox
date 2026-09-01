@@ -26,10 +26,13 @@ internal class FastApkStager internal constructor(private val vaultRoot: File) {
 
     companion object {
         private val MANIFEST_MAGIC = "APKBOXM1".toByteArray(Charsets.US_ASCII)
-        private const val PREFETCH_SLOTS = 6
         private const val SOURCE_BUFFER_BYTES = 1024 * 1024
         private const val MAX_CHUNK_BYTES = 1024 * 1024
         private val HEX = "0123456789abcdef".toCharArray()
+
+        // Bounded by chunk size: even on a many-core phone the vault pipeline holds at most ~8 MiB
+        // of prefetched APK data. Lower-core devices still get enough read-ahead to hide I/O waits.
+        private val PREFETCH_SLOTS = Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
     }
 
     enum class Source {
