@@ -79,7 +79,9 @@ object TempStorageManager {
         cache.listFiles()?.forEach { file ->
             val apkboxScratch = file.isFile && file.name.endsWith(".apk") && (
                 file.name.startsWith("apkbox-import-") ||
-                    file.name.startsWith("apkbox-icon-")
+                    file.name.startsWith("apkbox-icon-") ||
+                    file.name.startsWith("apkbox-gateway-") ||
+                    file.name.startsWith("apkbox-shared-")
                 )
             if (apkboxScratch && (deleteAllScratch || now - file.lastModified() >= SCRATCH_MAX_AGE_MS)) {
                 delete(file)
