@@ -13,6 +13,11 @@ class ApkBoxApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Listen immediately, but mark all persisted scanner history as already seen. New automatic
+        // scan outcomes from any trigger are then surfaced as debounced user-visible toasts.
+        AutoScanToastObserver.start(this)
+
         // Cleanup and Auto Scanner catch-up are important, but neither may hold the first frame.
         startupScope.launch {
             runCatching { TempStorageManager.cleanupStartup(this@ApkBoxApplication) }
