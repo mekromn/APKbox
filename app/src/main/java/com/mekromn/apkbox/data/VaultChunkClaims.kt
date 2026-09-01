@@ -24,14 +24,17 @@ internal object VaultChunkClaims {
         var closed = false
         return Closeable {
             synchronized(lock) {
-                if (closed) return@Closeable
-                closed = true
-                val claims = claimsByVault[vaultKey] ?: return@Closeable
-                for (hash in distinct) {
-                    val remaining = (claims[hash] ?: 1) - 1
-                    if (remaining <= 0) claims.remove(hash) else claims[hash] = remaining
+                if (!closed) {
+                    closed = true
+                    val claims = claimsByVault[vaultKey]
+                    if (claims != null) {
+                        for (hash in distinct) {
+                            val remaining = (claims[hash] ?: 1) - 1
+                            if (remaining <= 0) claims.remove(hash) else claims[hash] = remaining
+                        }
+                        if (claims.isEmpty()) claimsByVault.remove(vaultKey)
+                    }
                 }
-                if (claims.isEmpty()) claimsByVault.remove(vaultKey)
             }
         }
     }
@@ -41,7 +44,7 @@ internal object VaultChunkClaims {
      * and deletion. This path is rare; holding the small global coordination lock here is much safer
      * than making every hot-path chunk read acquire a lock.
      */
-    inline fun <T> withGarbageCollection(
+    fun <T> withGarbageCollection(
         vaultRoot: File,
         referencedHashes: Set<String>,
         block: (Set<String>) -> T,
