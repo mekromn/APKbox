@@ -17,60 +17,62 @@ import kotlin.random.Random
 
 class FastApkStagerTest {
     @Test
-    fun parallelVaultAndPreparedSourceStageIdenticalExactBytes() = runBlocking {
-        val root = Files.createTempDirectory("apkbox-fast-stager").toFile()
-        try {
-            val recordId = "speed-test-record"
-            val payloads = List(24) { index ->
-                // Vary chunk sizes while staying below APKbox's 1 MiB maximum.
-                Random(7000 + index).nextBytes(72 * 1024 + index * 11_137)
+    fun parallelVaultAndPreparedSourceStageIdenticalExactBytes() {
+        runBlocking {
+            val root = Files.createTempDirectory("apkbox-fast-stager").toFile()
+            try {
+                val recordId = "speed-test-record"
+                val payloads = List(24) { index ->
+                    // Vary chunk sizes while staying below APKbox's 1 MiB maximum.
+                    Random(7000 + index).nextBytes(72 * 1024 + index * 11_137)
+                }
+                val exactBytes = payloads.fold(ByteArray(0)) { acc, next -> acc + next }
+                val fullSha = sha256(exactBytes)
+
+                val chunks = payloads.map { bytes ->
+                    val hash = sha256(bytes)
+                    val target = File(File(root, "chunks/${hash.take(2)}"), "$hash.chunk")
+                    target.parentFile!!.mkdirs()
+                    target.writeBytes(bytes)
+                    hash to bytes.size
+                }
+                writeManifest(File(root, "manifests/$recordId.apkm"), chunks)
+
+                val record = record(
+                    id = recordId,
+                    size = exactBytes.size.toLong(),
+                    sha = fullSha,
+                    chunkCount = chunks.size,
+                )
+                val stager = FastApkStager(root)
+                val plan = stager.plan(record)
+                assertEquals(exactBytes.size.toLong(), plan.exactSize)
+
+                val vaultProgress = ArrayList<FastApkStager.Progress>()
+                val vaultOutput = ByteArrayOutputStream(exactBytes.size)
+                stager.stageVault(record, plan, vaultOutput) { vaultProgress += it }
+                assertArrayEquals(exactBytes, vaultOutput.toByteArray())
+                assertEquals(exactBytes.size.toLong(), vaultProgress.last().bytesWritten)
+                assertEquals(FastApkStager.Source.VAULT, vaultProgress.last().source)
+
+                val preparedFile = File(root, "prepared.apk").apply { writeBytes(exactBytes) }
+                val directProgress = ArrayList<FastApkStager.Progress>()
+                val directOutput = ByteArrayOutputStream(exactBytes.size)
+                stager.stagePreparedFile(record, plan, preparedFile, directOutput) { directProgress += it }
+                assertArrayEquals(exactBytes, directOutput.toByteArray())
+                assertEquals(exactBytes.size.toLong(), directProgress.last().bytesWritten)
+                assertEquals(FastApkStager.Source.PREPARED_FILE, directProgress.last().source)
+
+                // Same length is not enough: a single changed byte must stop staging before commit.
+                val corrupted = exactBytes.copyOf()
+                corrupted[corrupted.size / 2] = (corrupted[corrupted.size / 2].toInt() xor 0x5A).toByte()
+                preparedFile.writeBytes(corrupted)
+                assertThrows(IllegalStateException::class.java) {
+                    stager.stagePreparedFile(record, plan, preparedFile, ByteArrayOutputStream())
+                }
+            } finally {
+                root.deleteRecursively()
             }
-            val exactBytes = payloads.fold(ByteArray(0)) { acc, next -> acc + next }
-            val fullSha = sha256(exactBytes)
-
-            val chunks = payloads.map { bytes ->
-                val hash = sha256(bytes)
-                val target = File(File(root, "chunks/${hash.take(2)}"), "$hash.chunk")
-                target.parentFile!!.mkdirs()
-                target.writeBytes(bytes)
-                hash to bytes.size
-            }
-            writeManifest(File(root, "manifests/$recordId.apkm"), chunks)
-
-            val record = record(
-                id = recordId,
-                size = exactBytes.size.toLong(),
-                sha = fullSha,
-                chunkCount = chunks.size,
-            )
-            val stager = FastApkStager(root)
-            val plan = stager.plan(record)
-            assertEquals(exactBytes.size.toLong(), plan.exactSize)
-
-            val vaultProgress = ArrayList<FastApkStager.Progress>()
-            val vaultOutput = ByteArrayOutputStream(exactBytes.size)
-            stager.stageVault(record, plan, vaultOutput) { vaultProgress += it }
-            assertArrayEquals(exactBytes, vaultOutput.toByteArray())
-            assertEquals(exactBytes.size.toLong(), vaultProgress.last().bytesWritten)
-            assertEquals(FastApkStager.Source.VAULT, vaultProgress.last().source)
-
-            val preparedFile = File(root, "prepared.apk").apply { writeBytes(exactBytes) }
-            val directProgress = ArrayList<FastApkStager.Progress>()
-            val directOutput = ByteArrayOutputStream(exactBytes.size)
-            stager.stagePreparedFile(record, plan, preparedFile, directOutput) { directProgress += it }
-            assertArrayEquals(exactBytes, directOutput.toByteArray())
-            assertEquals(exactBytes.size.toLong(), directProgress.last().bytesWritten)
-            assertEquals(FastApkStager.Source.PREPARED_FILE, directProgress.last().source)
-
-            // Same length is not enough: a single changed byte must stop staging before commit.
-            val corrupted = exactBytes.copyOf()
-            corrupted[corrupted.size / 2] = (corrupted[corrupted.size / 2].toInt() xor 0x5A).toByte()
-            preparedFile.writeBytes(corrupted)
-            assertThrows(IllegalStateException::class.java) {
-                stager.stagePreparedFile(record, plan, preparedFile, ByteArrayOutputStream())
-            }
-        } finally {
-            root.deleteRecursively()
         }
     }
 
