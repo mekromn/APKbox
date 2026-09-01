@@ -581,11 +581,11 @@ private fun CompactApkRow(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 9.dp, bottom = 9.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StoredApkIcon(record, Modifier.size(56.dp), record.label)
-            Column(Modifier.weight(1f).padding(start = 12.dp, end = 2.dp)) {
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         record.displayName,
@@ -656,17 +656,6 @@ private fun CompactApkRow(
                         )
                     }
                 }
-            }
-            IconButton(
-                enabled = !busy,
-                onClick = onActions,
-                modifier = Modifier.size(36.dp),
-            ) {
-                Icon(
-                    Icons.Rounded.MoreVert,
-                    contentDescription = "APK actions",
-                    modifier = Modifier.size(22.dp),
-                )
             }
         }
     }
