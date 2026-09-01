@@ -73,11 +73,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class OpenApkInstallerActivity : ComponentActivity() {
-    companion object {
-        private const val NEW_PROJECT = "__new_project__"
-    }
+private const val OPEN_INSTALLER_NEW_PROJECT = "__new_project__"
 
+class OpenApkInstallerActivity : ComponentActivity() {
     private val libraryStore by lazy { ApkBoxServices.libraryStore(applicationContext) }
     private val apkInstaller by lazy { ApkInstaller(applicationContext, libraryStore) }
 
@@ -174,7 +172,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
             message.value = null
             try {
                 val record = withContext(Dispatchers.IO) {
-                    if (projectChoice == NEW_PROJECT) {
+                    if (projectChoice == OPEN_INSTALLER_NEW_PROJECT) {
                         libraryStore.importBase(incoming.uri, incoming.label).record
                     } else {
                         val alreadyHere = libraryStore.records.value.firstOrNull {
@@ -270,12 +268,12 @@ private fun OpenApkInstallerScreen(
     onCancelReplace: () -> Unit,
 ) {
     var selected by remember(preview?.packageName, projects) {
-        mutableStateOf(projects.firstOrNull()?.id ?: NEW_PROJECT)
+        mutableStateOf(projects.firstOrNull()?.id ?: OPEN_INSTALLER_NEW_PROJECT)
     }
 
     LaunchedEffect(preview?.packageName, projects.map { it.id }) {
-        if (selected != NEW_PROJECT && projects.none { it.id == selected }) {
-            selected = projects.firstOrNull()?.id ?: NEW_PROJECT
+        if (selected != OPEN_INSTALLER_NEW_PROJECT && projects.none { it.id == selected }) {
+            selected = projects.firstOrNull()?.id ?: OPEN_INSTALLER_NEW_PROJECT
         }
     }
 
@@ -378,9 +376,9 @@ private fun OpenApkInstallerScreen(
                             InstallerProjectRow(
                                 title = "Create new Project",
                                 subtitle = "Use ${preview.label} as the new base APK",
-                                selected = selected == NEW_PROJECT,
+                                selected = selected == OPEN_INSTALLER_NEW_PROJECT,
                                 icon = Icons.Rounded.CreateNewFolder,
-                                onClick = { selected = NEW_PROJECT },
+                                onClick = { selected = OPEN_INSTALLER_NEW_PROJECT },
                             )
                         }
                     }
