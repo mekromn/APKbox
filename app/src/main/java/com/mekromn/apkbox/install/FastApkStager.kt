@@ -21,12 +21,15 @@ import java.util.ArrayDeque
  * in manifest order and a single SHA-256 digest is computed over the exact outgoing stream before
  * PackageInstaller is allowed to commit it.
  */
-internal class FastApkStager(context: Context) {
+internal class FastApkStager internal constructor(private val vaultRoot: File) {
+    constructor(context: Context) : this(File(context.applicationContext.filesDir, "apkbox-vault"))
+
     companion object {
         private val MANIFEST_MAGIC = "APKBOXM1".toByteArray(Charsets.US_ASCII)
         private const val PREFETCH_SLOTS = 6
         private const val SOURCE_BUFFER_BYTES = 1024 * 1024
         private const val MAX_CHUNK_BYTES = 1024 * 1024
+        private val HEX = "0123456789abcdef".toCharArray()
     }
 
     enum class Source {
@@ -54,8 +57,6 @@ internal class FastApkStager(context: Context) {
         val size: Int,
     )
 
-    private val appContext = context.applicationContext
-    private val vaultRoot = File(appContext.filesDir, "apkbox-vault")
     private val manifestsDir = File(vaultRoot, "manifests")
     private val chunksDir = File(vaultRoot, "chunks")
 
@@ -106,7 +107,7 @@ internal class FastApkStager(context: Context) {
         check(written == plan.exactSize) {
             "Reconstruction size mismatch: manifest requires ${plan.exactSize} bytes, wrote $written."
         }
-        val actualSha = digest.digest().toHex()
+        val actualSha = fastHex(digest.digest())
         check(actualSha == record.sha256) {
             "Reconstruction checksum mismatch. Operation cancelled to protect the stored build."
         }
@@ -144,7 +145,7 @@ internal class FastApkStager(context: Context) {
         check(written == plan.exactSize) {
             "Prepared APK size mismatch: expected ${plan.exactSize} bytes, staged $written."
         }
-        val actualSha = digest.digest().toHex()
+        val actualSha = fastHex(digest.digest())
         check(actualSha == record.sha256) {
             "Prepared APK checksum changed. Installation cancelled before commit."
         }
@@ -167,7 +168,7 @@ internal class FastApkStager(context: Context) {
                     input.readFully(hashBytes)
                     val size = input.readInt()
                     check(size in 1..MAX_CHUNK_BYTES) { "Invalid manifest chunk size." }
-                    chunks += Chunk(hash = hashBytes.toHex(), size = size)
+                    chunks += Chunk(hash = fastHex(hashBytes), size = size)
                 }
             }
         }
@@ -191,7 +192,14 @@ internal class FastApkStager(context: Context) {
         return bytes
     }
 
-    private fun ByteArray.toHex(): String = buildString(size * 2) {
-        for (byte in this@toHex) append("%02x".format(byte))
+    private fun fastHex(bytes: ByteArray): String {
+        val chars = CharArray(bytes.size * 2)
+        var out = 0
+        for (byte in bytes) {
+            val value = byte.toInt() and 0xFF
+            chars[out++] = HEX[value ushr 4]
+            chars[out++] = HEX[value and 0x0F]
+        }
+        return String(chars)
     }
 }
