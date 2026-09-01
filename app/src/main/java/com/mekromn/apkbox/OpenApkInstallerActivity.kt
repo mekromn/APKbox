@@ -55,15 +55,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.data.ApkInspector
+import com.mekromn.apkbox.data.PreparedSharedApk
 import com.mekromn.apkbox.data.SharedApkAnalyzer
 import com.mekromn.apkbox.data.SharedApkPreview
 import com.mekromn.apkbox.install.ApkInstaller
+import com.mekromn.apkbox.install.InstallProgress
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.model.ReplaceReason
 import com.mekromn.apkbox.model.ReplaceRequest
@@ -83,8 +86,10 @@ class OpenApkInstallerActivity : ComponentActivity() {
     private val busy = MutableStateFlow(false)
     private val message = MutableStateFlow<String?>(null)
     private val replaceRequest = MutableStateFlow<ReplaceRequest?>(null)
+    private val installProgress = MutableStateFlow<InstallProgress?>(null)
 
     private var sourceUri: Uri? = null
+    private var preparedApk: PreparedSharedApk? = null
     private var installWaitingForPermission: ApkRecord? = null
     private var installWaitingForRemoval: ApkRecord? = null
 
@@ -114,6 +119,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
                 val isBusy = busy.collectAsStateWithLifecycle().value
                 val currentMessage = message.collectAsStateWithLifecycle().value
                 val currentReplace = replaceRequest.collectAsStateWithLifecycle().value
+                val currentProgress = installProgress.collectAsStateWithLifecycle().value
 
                 OpenApkInstallerScreen(
                     preview = currentPreview,
@@ -124,6 +130,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
                     busy = isBusy,
                     message = currentMessage,
                     replaceRequest = currentReplace,
+                    installProgress = currentProgress,
                     onCancel = { finish() },
                     onArchiveAndInstall = ::archiveAndInstall,
                     onConfirmReplace = ::confirmReplacement,
@@ -139,11 +146,13 @@ class OpenApkInstallerActivity : ComponentActivity() {
             lifecycleScope.launch {
                 busy.value = true
                 try {
-                    preview.value = SharedApkAnalyzer.analyze(
+                    preparedApk?.close()
+                    preparedApk = SharedApkAnalyzer.prepareForInstall(
                         this@OpenApkInstallerActivity,
-                        listOf(uri),
+                        uri,
                         libraryStore.records.value,
-                    ).single()
+                    )
+                    preview.value = preparedApk?.preview
                 } catch (t: Throwable) {
                     message.value = t.message ?: "Android could not inspect this APK."
                 } finally {
@@ -163,23 +172,35 @@ class OpenApkInstallerActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        preparedApk?.close()
+        preparedApk = null
+        super.onDestroy()
+    }
+
     private fun archiveAndInstall(projectChoice: String) {
-        val incoming = preview.value ?: return
+        val prepared = preparedApk ?: return
+        val incoming = prepared.preview
         if (busy.value) return
 
         lifecycleScope.launch {
             busy.value = true
+            installProgress.value = null
             message.value = null
             try {
+                val preparedUri = Uri.fromFile(prepared.file)
                 val record = withContext(Dispatchers.IO) {
                     if (projectChoice == OPEN_INSTALLER_NEW_PROJECT) {
-                        libraryStore.importBase(incoming.uri, incoming.label).record
+                        libraryStore.importBase(preparedUri, incoming.label).record
                     } else {
                         val alreadyHere = libraryStore.records.value.firstOrNull {
                             it.projectId == projectChoice && it.sha256 == incoming.sha256
                         }
-                        alreadyHere ?: libraryStore.importRevision(projectChoice, incoming.uri).record
+                        alreadyHere ?: libraryStore.importRevision(projectChoice, preparedUri).record
                     }
+                }
+                check(record.sha256 == incoming.sha256) {
+                    "Archived APK identity changed unexpectedly. Installation cancelled."
                 }
                 busy.value = false
                 requestInstall(record)
@@ -194,6 +215,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
         if (busy.value) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             installWaitingForPermission = record
+            installProgress.value = null
             message.value = "Allow APKbox to install unknown apps, then return here."
             startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
             return
@@ -241,12 +263,18 @@ class OpenApkInstallerActivity : ComponentActivity() {
         if (busy.value) return
         lifecycleScope.launch {
             busy.value = true
+            installProgress.value = InstallProgress(0L, record.sizeBytes, directPreparedSource = true)
             try {
-                apkInstaller.install(record)
+                apkInstaller.install(
+                    record = record,
+                    preparedSource = preparedApk?.file,
+                    onProgress = { progress -> installProgress.value = progress },
+                )
                 finish()
             } catch (t: Throwable) {
                 message.value = t.message ?: "Installation could not be staged."
             } finally {
+                installProgress.value = null
                 busy.value = false
             }
         }
@@ -262,11 +290,13 @@ private fun OpenApkInstallerScreen(
     busy: Boolean,
     message: String?,
     replaceRequest: ReplaceRequest?,
+    installProgress: InstallProgress?,
     onCancel: () -> Unit,
     onArchiveAndInstall: (String) -> Unit,
     onConfirmReplace: () -> Unit,
     onCancelReplace: () -> Unit,
 ) {
+    val context = LocalContext.current
     var selected by remember(preview?.packageName, projects) {
         mutableStateOf(projects.firstOrNull()?.id ?: OPEN_INSTALLER_NEW_PROJECT)
     }
@@ -290,7 +320,13 @@ private fun OpenApkInstallerScreen(
                     title = { Text("APKbox Installer", fontWeight = FontWeight.SemiBold) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 )
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                when {
+                    installProgress != null -> LinearProgressIndicator(
+                        progress = { installProgress.fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    busy -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
             }
         },
         bottomBar = {
@@ -342,10 +378,27 @@ private fun OpenApkInstallerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        "${preview.versionName} · code ${preview.versionCode} · ${Formatter.formatFileSize(androidx.compose.ui.platform.LocalContext.current, preview.sizeBytes)}",
+                        "${preview.versionName} · code ${preview.versionCode} · ${Formatter.formatFileSize(context, preview.sizeBytes)}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+
+                    if (installProgress != null) {
+                        Spacer(Modifier.size(12.dp))
+                        val percent = (installProgress.fraction * 100f).toInt().coerceIn(0, 100)
+                        Text(
+                            "Preparing install · ${Formatter.formatFileSize(context, installProgress.bytesWritten)} / ${Formatter.formatFileSize(context, installProgress.totalBytes)} · $percent%",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            if (installProgress.directPreparedSource) "Direct verified source stream"
+                            else "Parallel vault prefetch · ordered exact stream",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
 
                     Spacer(Modifier.size(24.dp))
                     Surface(
