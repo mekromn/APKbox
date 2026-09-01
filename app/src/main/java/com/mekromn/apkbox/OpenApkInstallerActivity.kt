@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.data.ApkInspector
+import com.mekromn.apkbox.data.GatewaySourceClaims
 import com.mekromn.apkbox.data.PreparedSharedApk
 import com.mekromn.apkbox.data.SharedApkAnalyzer
 import com.mekromn.apkbox.data.SharedApkPreview
@@ -75,6 +76,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.Closeable
 
 private const val OPEN_INSTALLER_NEW_PROJECT = "__new_project__"
 
@@ -89,6 +91,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
     private val installProgress = MutableStateFlow<InstallProgress?>(null)
 
     private var sourceUri: Uri? = null
+    private var sourceClaim: Closeable? = null
     private var preparedApk: PreparedSharedApk? = null
     private var installWaitingForPermission: ApkRecord? = null
     private var installWaitingForRemoval: ApkRecord? = null
@@ -110,6 +113,11 @@ class OpenApkInstallerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         sourceUri = intent?.data
+
+        // Claim immediately, before startup/resume Auto Scanner can inventory Downloads. Resolving
+        // this key is metadata-only (name + size); it never hashes or copies the APK.
+        sourceClaim?.close()
+        sourceClaim = sourceUri?.let { GatewaySourceClaims.claimUri(this, it) }
 
         setContent {
             APKboxTheme {
@@ -175,6 +183,8 @@ class OpenApkInstallerActivity : ComponentActivity() {
     override fun onDestroy() {
         preparedApk?.close()
         preparedApk = null
+        sourceClaim?.close()
+        sourceClaim = null
         super.onDestroy()
     }
 
