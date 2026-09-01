@@ -211,7 +211,8 @@ class AutoScanManager(
                 file.isFile &&
                     file.extension.equals("apk", ignoreCase = true) &&
                     file.length() > 0L &&
-                    now - file.lastModified() >= STABLE_FILE_AGE_MS
+                    now - file.lastModified() >= STABLE_FILE_AGE_MS &&
+                    !GatewaySourceClaims.isClaimed(file)
             }
             .toList()
             .sortedBy { it.lastModified() }
@@ -222,6 +223,10 @@ class AutoScanManager(
         var failed = 0
 
         for (file in candidates) {
+            // Re-check at the last possible cheap point in case the gateway claimed the APK after
+            // the directory inventory was built. The next catch-up scan will handle it later.
+            if (GatewaySourceClaims.isClaimed(file)) continue
+
             val matchingRules = activeRules.filter { it.matches(file.name) }
             if (matchingRules.isEmpty()) continue
             examined++
@@ -280,6 +285,14 @@ class AutoScanManager(
     ): Event {
         if (!file.isFile) {
             return Event(file.name, project.id, EventStatus.FAILED, "File disappeared before import.")
+        }
+        if (GatewaySourceClaims.isClaimed(file)) {
+            return Event(
+                file.name,
+                project.id,
+                EventStatus.ALREADY_STORED_KEPT,
+                "Installer gateway is using this APK; Auto Scanner deferred it without reading or deleting it.",
+            )
         }
 
         val projectRecords = libraryStore.records.value.filter { it.projectId == project.id }
