@@ -11,10 +11,21 @@ import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
+
+data class InstallProgress(
+    val bytesWritten: Long,
+    val totalBytes: Long,
+    val directPreparedSource: Boolean,
+) {
+    val fraction: Float
+        get() = if (totalBytes <= 0L) 0f else (bytesWritten.toDouble() / totalBytes)
+            .coerceIn(0.0, 1.0).toFloat()
+}
 
 class ApkInstaller(
     context: Context,
-    private val libraryStore: LibraryStore,
+    @Suppress("UNUSED_PARAMETER") libraryStore: LibraryStore,
 ) {
     companion object {
         private const val STALE_SESSION_MS = 10L * 60L * 1000L
@@ -23,6 +34,7 @@ class ApkInstaller(
     }
 
     private val appContext = context.applicationContext
+    private val fastStager = FastApkStager(appContext)
     private val installer: PackageInstaller
         get() = appContext.packageManager.packageInstaller
 
@@ -47,7 +59,19 @@ class ApkInstaller(
         return abandoned
     }
 
-    suspend fun install(record: ApkRecord) = withContext(Dispatchers.IO) {
+    /**
+     * Stages an APK without changing a single byte.
+     *
+     * If [preparedSource] is supplied (the standalone Open-with-APKbox gateway), the already-read
+     * source file is streamed directly into PackageInstaller and SHA-256 verified during that exact
+     * write. Otherwise APKbox reconstructs from the vault with bounded parallel chunk prefetch,
+     * still emitting bytes strictly in manifest order and verifying the whole outgoing SHA-256.
+     */
+    suspend fun install(
+        record: ApkRecord,
+        preparedSource: File? = null,
+        onProgress: ((InstallProgress) -> Unit)? = null,
+    ) = withContext(Dispatchers.IO) {
         // Reclaim old full-size scratch APKs before asking Android for another large staging area.
         TempStorageManager.cleanupRoutine(appContext)
 
@@ -58,9 +82,9 @@ class ApkInstaller(
             "Another APKbox install is already staged. Finish or cancel that install first, or use ‘Free temporary install space’. APKbox will not stage multiple full APK copies at once."
         }
 
-        // Never trust cached/index size metadata here. The ordered manifest is authoritative.
-        val exactSize = libraryStore.authoritativeSize(record)
-        require(exactSize > 0L) { "Stored APK manifest has an invalid size." }
+        // Read the compact binary manifest once. It is the authority for install size and ordering.
+        val plan = fastStager.plan(record)
+        val exactSize = plan.exactSize
 
         // Android can briefly need both a full staging copy and the destination package copy.
         // Keep an additional reserve so APKbox refuses early instead of filling /data mid-install.
@@ -87,8 +111,34 @@ class ApkInstaller(
         try {
             session = installer.openSession(sessionId)
             session.openWrite("base.apk", 0, exactSize).use { output ->
-                // LibraryStore validates manifest byte count + full original SHA-256 before commit.
-                libraryStore.streamApk(record, output)
+                val progressBridge: (FastApkStager.Progress) -> Unit = { progress ->
+                    onProgress?.invoke(
+                        InstallProgress(
+                            bytesWritten = progress.bytesWritten,
+                            totalBytes = progress.totalBytes,
+                            directPreparedSource = progress.source == FastApkStager.Source.PREPARED_FILE,
+                        )
+                    )
+                }
+
+                if (preparedSource?.isFile == true) {
+                    fastStager.stagePreparedFile(
+                        record = record,
+                        plan = plan,
+                        sourceFile = preparedSource,
+                        output = output,
+                        onProgress = progressBridge,
+                    )
+                } else {
+                    fastStager.stageVault(
+                        record = record,
+                        plan = plan,
+                        output = output,
+                        onProgress = progressBridge,
+                    )
+                }
+
+                // Durability semantics are unchanged: PackageInstaller is fsynced before commit.
                 session.fsync(output)
             }
 
