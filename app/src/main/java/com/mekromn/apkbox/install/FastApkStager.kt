@@ -1,6 +1,7 @@
 package com.mekromn.apkbox.install
 
 import android.content.Context
+import com.mekromn.apkbox.data.VaultChunkClaims
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -75,44 +76,53 @@ internal class FastApkStager internal constructor(private val vaultRoot: File) {
         plan: Plan,
         output: OutputStream,
         onProgress: ((Progress) -> Unit)? = null,
-    ) = coroutineScope {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val queue = ArrayDeque<Deferred<Pair<Chunk, ByteArray>>>()
-        var nextIndex = 0
-        var written = 0L
+    ) {
+        // Keep every manifest hash alive for the duration of staging. This preserves the old
+        // serialized reader's safety while allowing read-ahead workers to run concurrently.
+        val claim = VaultChunkClaims.claim(vaultRoot, plan.chunks.map { it.hash })
+        try {
+            coroutineScope {
+                val digest = MessageDigest.getInstance("SHA-256")
+                val queue = ArrayDeque<Deferred<Pair<Chunk, ByteArray>>>()
+                var nextIndex = 0
+                var written = 0L
 
-        fun fillPrefetch() {
-            while (queue.size < PREFETCH_SLOTS && nextIndex < plan.chunks.size) {
-                val chunk = plan.chunks[nextIndex++]
-                queue.addLast(
-                    async(Dispatchers.IO) {
-                        chunk to readChunk(chunk)
+                fun fillPrefetch() {
+                    while (queue.size < PREFETCH_SLOTS && nextIndex < plan.chunks.size) {
+                        val chunk = plan.chunks[nextIndex++]
+                        queue.addLast(
+                            async(Dispatchers.IO) {
+                                chunk to readChunk(chunk)
+                            }
+                        )
                     }
-                )
+                }
+
+                fillPrefetch()
+                for (expectedChunk in plan.chunks) {
+                    val (actualChunk, bytes) = queue.removeFirst().await()
+                    check(actualChunk == expectedChunk) { "Internal APKbox staging order mismatch." }
+
+                    // One write per content-defined chunk. This cuts FileBridge/OutputStream call
+                    // overhead while preserving the exact manifest order byte-for-byte.
+                    output.write(bytes)
+                    digest.update(bytes)
+                    written += bytes.size
+                    onProgress?.invoke(Progress(written, plan.exactSize, Source.VAULT))
+                    fillPrefetch()
+                }
+                output.flush()
+
+                check(written == plan.exactSize) {
+                    "Reconstruction size mismatch: manifest requires ${plan.exactSize} bytes, wrote $written."
+                }
+                val actualSha = fastHex(digest.digest())
+                check(actualSha == record.sha256) {
+                    "Reconstruction checksum mismatch. Operation cancelled to protect the stored build."
+                }
             }
-        }
-
-        fillPrefetch()
-        for (expectedChunk in plan.chunks) {
-            val (actualChunk, bytes) = queue.removeFirst().await()
-            check(actualChunk == expectedChunk) { "Internal APKbox staging order mismatch." }
-
-            // One write per content-defined chunk. This cuts FileBridge/OutputStream call overhead
-            // while preserving the exact manifest order byte-for-byte.
-            output.write(bytes)
-            digest.update(bytes)
-            written += bytes.size
-            onProgress?.invoke(Progress(written, plan.exactSize, Source.VAULT))
-            fillPrefetch()
-        }
-        output.flush()
-
-        check(written == plan.exactSize) {
-            "Reconstruction size mismatch: manifest requires ${plan.exactSize} bytes, wrote $written."
-        }
-        val actualSha = fastHex(digest.digest())
-        check(actualSha == record.sha256) {
-            "Reconstruction checksum mismatch. Operation cancelled to protect the stored build."
+        } finally {
+            claim.close()
         }
     }
 
