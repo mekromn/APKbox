@@ -11,6 +11,7 @@ import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.File
 
 data class InstallProgress(
@@ -31,6 +32,7 @@ class ApkInstaller(
         private const val STALE_SESSION_MS = 10L * 60L * 1000L
         private const val SAFETY_RESERVE_BYTES = 256L * 1024L * 1024L
         private const val MIB = 1024L * 1024L
+        private const val INSTALL_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
     }
 
     private val appContext = context.applicationContext
@@ -110,7 +112,11 @@ class ApkInstaller(
         var session: PackageInstaller.Session? = null
         try {
             session = installer.openSession(sessionId)
-            session.openWrite("base.apk", 0, exactSize).use { output ->
+            session.openWrite("base.apk", 0, exactSize).use { rawOutput ->
+                // PackageInstaller's session stream is a binder/file-bridge boundary. Coalescing the
+                // many ordered chunk writes into 4 MiB blocks materially reduces call/syscall
+                // overhead. This changes only write granularity, never byte content or order.
+                val output = BufferedOutputStream(rawOutput, INSTALL_WRITE_BUFFER_BYTES)
                 val progressBridge: (FastApkStager.Progress) -> Unit = { progress ->
                     onProgress?.invoke(
                         InstallProgress(
@@ -138,8 +144,11 @@ class ApkInstaller(
                     )
                 }
 
+                // FastApkStager flushes, but flush explicitly here as the handoff barrier before
+                // fsync. Do not close the wrapper: rawOutput is owned by the use block below.
+                output.flush()
                 // Durability semantics are unchanged: PackageInstaller is fsynced before commit.
-                session.fsync(output)
+                session.fsync(rawOutput)
             }
 
             val callbackIntent = Intent(appContext, InstallResultReceiver::class.java).apply {
