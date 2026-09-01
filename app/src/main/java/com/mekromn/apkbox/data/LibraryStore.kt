@@ -105,26 +105,53 @@ class LibraryStore(context: Context) {
         }
     }
 
-    suspend fun importBase(uri: Uri, projectName: String? = null): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun importBase(
+        uri: Uri,
+        projectName: String? = null,
+        displayNameOverride: String? = null,
+    ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             val projectId = UUID.randomUUID().toString()
-            importApkLocked(uri, projectId, isBase = true, pendingProjectName = projectName)
+            importApkLocked(
+                uri = uri,
+                projectId = projectId,
+                isBase = true,
+                pendingProjectName = projectName,
+                displayNameOverride = displayNameOverride,
+            )
         }
     }
 
     /** Compatibility helper for a one-project vault. */
-    suspend fun importRevision(uri: Uri): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun importRevision(
+        uri: Uri,
+        displayNameOverride: String? = null,
+    ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             val project = _projects.value.singleOrNull()
                 ?: error("Choose which APKbox project should receive this revision.")
-            importApkLocked(uri, project.id, isBase = false)
+            importApkLocked(
+                uri = uri,
+                projectId = project.id,
+                isBase = false,
+                displayNameOverride = displayNameOverride,
+            )
         }
     }
 
-    suspend fun importRevision(projectId: String, uri: Uri): ImportResult = withContext(Dispatchers.IO) {
+    suspend fun importRevision(
+        projectId: String,
+        uri: Uri,
+        displayNameOverride: String? = null,
+    ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             require(_projects.value.any { it.id == projectId }) { "That APKbox project no longer exists." }
-            importApkLocked(uri, projectId, isBase = false)
+            importApkLocked(
+                uri = uri,
+                projectId = projectId,
+                isBase = false,
+                displayNameOverride = displayNameOverride,
+            )
         }
     }
 
@@ -133,6 +160,7 @@ class LibraryStore(context: Context) {
         projectId: String,
         isBase: Boolean,
         pendingProjectName: String? = null,
+        displayNameOverride: String? = null,
     ): ImportResult {
         val current = _records.value
         val existingProject = _projects.value.firstOrNull { it.id == projectId }
@@ -146,7 +174,9 @@ class LibraryStore(context: Context) {
         } else null
         val ownsSnapshot = directSource == null
         val sourceFile = directSource ?: File(appContext.cacheDir, "apkbox-import-${UUID.randomUUID()}.apk")
-        val sourceDisplayName = directSource?.name ?: documentDisplayName(uri)
+        val sourceDisplayName = displayNameOverride?.trim()?.takeIf { it.isNotBlank() }
+            ?: directSource?.name
+            ?: documentDisplayName(uri)
         val directSizeBefore = directSource?.length() ?: -1L
         val directModifiedBefore = directSource?.lastModified() ?: -1L
 
