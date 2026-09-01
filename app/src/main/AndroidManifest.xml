@@ -38,21 +38,33 @@
         </activity>
 
         <!--
-          Transient package-manager-style path: open an APK with APKbox, choose a Project,
-          archive/verify it, then hand off to Android's normal install confirmation. This activity
-          never opens MainActivity and is intentionally excluded from Recents.
+          Transient package-manager-style path: open/install an APK with APKbox, choose a Project,
+          archive/verify it, then hand off to Android's normal install confirmation. This mirrors
+          Android Package Installer's VIEW + INSTALL_PACKAGE registration for APK content while
+          never opening MainActivity.
         -->
         <activity
             android:name=".OpenApkInstallerActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:screenOrientation="unspecified">
+            <intent-filter android:label="Archive &amp; install with APKbox" android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+
+            <!-- Some third-party file managers expose APKs as generic binary content. -->
             <intent-filter android:label="Archive &amp; install with APKbox">
                 <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="content" android:mimeType="application/vnd.android.package-archive" />
-                <data android:scheme="file" android:mimeType="application/vnd.android.package-archive" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 
