@@ -118,7 +118,7 @@ fun ApkCleanupScreen(
         scanError = null
         try {
             val result = withContext(Dispatchers.IO) {
-                ApkDiskCleanupScanner.scan(root, records)
+                ApkDiskCleanupScanner.scan(context, root, records)
             }
             candidates = result.candidates
             directoriesVisited = result.directoriesVisited
