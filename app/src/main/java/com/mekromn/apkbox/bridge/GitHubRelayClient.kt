@@ -4,6 +4,8 @@ import android.os.Build
 import android.util.Base64
 import com.mekromn.apkbox.agent.AgentCheckpoint
 import com.mekromn.apkbox.agent.AutonomousPlan
+import com.mekromn.apkbox.agent.BuildCandidate
+import com.mekromn.apkbox.agent.BuildRunCheckpoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -76,6 +78,20 @@ class GitHubRelayClient {
         plan
     }
 
+    suspend fun fetchBuildCandidate(
+        config: BridgeConfig,
+        token: String,
+        buildId: String,
+    ): BuildCandidate = withContext(Dispatchers.IO) {
+        val safeBuild = buildId.trim()
+        require(runIdRegex.matches(safeBuild)) { "Invalid build candidate ID." }
+        val path = "bridge/devices/${config.deviceId}/builds/$safeBuild.json"
+        val file = getTextFile(config, token, path) ?: error("Build candidate is missing: $path")
+        val candidate = BuildCandidate.fromJson(JSONObject(file.text))
+        require(candidate.buildId == safeBuild) { "Build manifest ID does not match the requested build." }
+        candidate
+    }
+
     suspend fun writeAgentCheckpoint(
         config: BridgeConfig,
         token: String,
@@ -87,6 +103,20 @@ class GitHubRelayClient {
             .put("deviceId", config.deviceId)
             .put("publishedAtEpochMs", System.currentTimeMillis())
         putJson(config, token, path, json, "APKbox agent checkpoint ${checkpoint.runId}")
+        path
+    }
+
+    suspend fun writeBuildCheckpoint(
+        config: BridgeConfig,
+        token: String,
+        checkpoint: BuildRunCheckpoint,
+    ): String = withContext(Dispatchers.IO) {
+        require(runIdRegex.matches(checkpoint.runId)) { "Invalid build checkpoint run ID." }
+        val path = "bridge/devices/${config.deviceId}/build-runs/${checkpoint.runId}/checkpoint.json"
+        val json = checkpoint.toJson()
+            .put("deviceId", config.deviceId)
+            .put("publishedAtEpochMs", System.currentTimeMillis())
+        putJson(config, token, path, json, "APKbox build checkpoint ${checkpoint.runId}")
         path
     }
 
@@ -133,7 +163,7 @@ class GitHubRelayClient {
         adbStatus: AdbBridgeStatus,
     ) = withContext(Dispatchers.IO) {
         val json = JSONObject()
-            .put("schema", 3)
+            .put("schema", 4)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
@@ -158,7 +188,8 @@ class GitHubRelayClient {
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
-                "agent_checkpoint", "agent_plan", "conversation_handoff", "wireless_adb_auto_heal"
+                "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint", "unattended_adb_install",
+                "conversation_handoff", "wireless_adb_auto_heal"
             )))
         val path = "bridge/devices/${config.deviceId}/state.json"
         putJson(config, token, path, json, "APKbox bridge heartbeat")
