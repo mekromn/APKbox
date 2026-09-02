@@ -70,6 +70,8 @@ class BridgePolicyTest {
             "logcat -d | grep AndroidRuntime",
             "echo test",
             "sh -c id",
+            "am start -n com.example.app/.MainActivity",
+            "am broadcast -a com.example.DO_THING",
         )
         commands.forEach { command ->
             val request = request(BridgeCommandType.SHELL, command = command)
