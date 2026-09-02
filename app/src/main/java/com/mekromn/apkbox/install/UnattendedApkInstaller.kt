@@ -116,7 +116,7 @@ class UnattendedApkInstaller(
                 verifyInstalledBaseSha(record)
                 result
             } finally {
-                if (verifiedSource.parentFile?.canonicalFile == tempDir.canonicalFile) {
+                if (runCatching { verifiedSource.parentFile?.canonicalFile == tempDir.canonicalFile }.getOrDefault(false)) {
                     verifiedSource.delete()
                 }
                 cleanupTemps()
@@ -153,11 +153,12 @@ class UnattendedApkInstaller(
     }
 
     private fun checkAdditionalSpace(exactSize: Long, fullCopiesNeeded: Int) {
+        val copies = fullCopiesNeeded.coerceAtLeast(1)
         val available = runCatching { StatFs(appContext.filesDir.absolutePath).availableBytes }
             .getOrDefault(Long.MAX_VALUE)
-        val maxSafeSize = (Long.MAX_VALUE - SAFETY_RESERVE_BYTES) / fullCopiesNeeded.coerceAtLeast(1)
+        val maxSafeSize = (Long.MAX_VALUE - SAFETY_RESERVE_BYTES) / copies
         val required = if (exactSize > maxSafeSize) Long.MAX_VALUE
-        else exactSize * fullCopiesNeeded + SAFETY_RESERVE_BYTES
+        else exactSize * copies + SAFETY_RESERVE_BYTES
         check(available >= required) {
             "Not enough free space for a verified unattended install. APKbox needs about ${toMiB(required)} MiB free, but only ${toMiB(available)} MiB is available."
         }
@@ -171,8 +172,11 @@ class UnattendedApkInstaller(
     private fun sanitize(value: String): String =
         value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(96).ifBlank { "apk" }
 
-    private fun toMiB(bytes: Long): Long =
-        if (bytes <= 0L) 0L else (bytes + MIB - 1L) / MIB
+    private fun toMiB(bytes: Long): Long = when {
+        bytes <= 0L -> 0L
+        bytes == Long.MAX_VALUE -> Long.MAX_VALUE / MIB
+        else -> bytes / MIB + if (bytes % MIB == 0L) 0L else 1L
+    }
 
     private object NullOutputStream : OutputStream() {
         override fun write(b: Int) = Unit
