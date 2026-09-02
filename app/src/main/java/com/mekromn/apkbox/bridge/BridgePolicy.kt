@@ -59,7 +59,8 @@ object BridgePolicy {
         BridgeCommandType.UI_SWIPE,
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
-        BridgeCommandType.UI_WAIT -> BridgeRisk.DEBUG_ACTION
+        BridgeCommandType.UI_WAIT,
+        BridgeCommandType.AGENT_START -> BridgeRisk.DEBUG_ACTION
 
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
@@ -93,8 +94,8 @@ object BridgePolicy {
     /**
      * Autonomous screen interaction needs both package scope and run/sequence scope. A one-off
      * manually approved UI action may omit run metadata, but it can never inherit trusted-session
-     * auto-execution in that form. LAUNCH remains the existing low-impact package-scoped debug
-     * action and does not require a run ledger unless the caller supplies one.
+     * auto-execution in that form. AGENT_START is intentionally excluded: approving a bounded plan
+     * is a fresh user decision and can never be inherited from an earlier trusted session.
      */
     private fun debugActionIsSafelyScoped(request: BridgeRequest): Boolean = when (request.type) {
         BridgeCommandType.LAUNCH -> validPackage(request.packageName)
@@ -104,6 +105,7 @@ object BridgePolicy {
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
         BridgeCommandType.UI_WAIT -> validPackage(request.packageName) && validRunSequence(request)
+        BridgeCommandType.AGENT_START -> false
         else -> false
     }
 
