@@ -2,6 +2,8 @@ package com.mekromn.apkbox.bridge
 
 import android.os.Build
 import android.util.Base64
+import com.mekromn.apkbox.agent.AgentCheckpoint
+import com.mekromn.apkbox.agent.AutonomousPlan
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -24,6 +26,7 @@ class GitHubRelayClient {
         private const val API_VERSION = "2022-11-28"
         private const val MAX_RESPONSE_CHARS = 3_500_000
         private const val MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+        private val runIdRegex = Regex("[A-Za-z0-9._-]{1,96}")
     }
 
     suspend fun test(config: BridgeConfig, token: String): String = withContext(Dispatchers.IO) {
@@ -57,6 +60,34 @@ class GitHubRelayClient {
                 .onSuccess { request -> items += RelayInboxItem(path, sha.ifBlank { file.sha }, request) }
         }
         items.sortedBy { it.request.createdAtEpochMs }
+    }
+
+    suspend fun fetchAgentPlan(
+        config: BridgeConfig,
+        token: String,
+        runId: String,
+    ): AutonomousPlan = withContext(Dispatchers.IO) {
+        val safeRun = runId.trim()
+        require(runIdRegex.matches(safeRun)) { "Invalid autonomous run ID." }
+        val path = "bridge/devices/${config.deviceId}/plans/$safeRun.json"
+        val file = getTextFile(config, token, path) ?: error("Autonomous plan is missing: $path")
+        val plan = AutonomousPlan.fromJson(JSONObject(file.text))
+        require(plan.runId == safeRun) { "Plan run ID does not match AGENT_START request." }
+        plan
+    }
+
+    suspend fun writeAgentCheckpoint(
+        config: BridgeConfig,
+        token: String,
+        checkpoint: AgentCheckpoint,
+    ): String = withContext(Dispatchers.IO) {
+        require(runIdRegex.matches(checkpoint.runId)) { "Invalid autonomous checkpoint run ID." }
+        val path = "bridge/devices/${config.deviceId}/runs/${checkpoint.runId}/checkpoint.json"
+        val json = checkpoint.toJson()
+            .put("deviceId", config.deviceId)
+            .put("publishedAtEpochMs", System.currentTimeMillis())
+        putJson(config, token, path, json, "APKbox agent checkpoint ${checkpoint.runId}")
+        path
     }
 
     suspend fun writeResult(config: BridgeConfig, token: String, result: BridgeResult) = withContext(Dispatchers.IO) {
@@ -127,7 +158,7 @@ class GitHubRelayClient {
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
-                "agent_checkpoint", "conversation_handoff", "wireless_adb_auto_heal"
+                "agent_checkpoint", "agent_plan", "conversation_handoff", "wireless_adb_auto_heal"
             )))
         val path = "bridge/devices/${config.deviceId}/state.json"
         putJson(config, token, path, json, "APKbox bridge heartbeat")
