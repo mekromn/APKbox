@@ -52,7 +52,7 @@ data class WatchdogCheckConfig(
 
 data class WatchdogOutcome(
     val decision: OracleDecision,
-    val observation: CollectedAgentObservation,
+    val observation: CollectedAgentObservation?,
     val checkpoint: AgentCheckpoint,
     val state: AgentWatchdogState,
     val evidence: EvidenceBundle? = null,
@@ -109,38 +109,30 @@ class AgentWatchdog(
             updatedAtEpochMs = observation.nowEpochMs,
         )
 
-        // Capture before changing the run state or consuming a recovery budget. This keeps the
-        // bundle representative of the failure that triggered the watchdog.
-        val evidence = if (decision.captureEvidence) {
-            runCatching { evidenceCollector.capture(observedCheckpoint, decision) }.getOrNull()
-        } else null
-
-        val retryAvailable = decision.mayRetry && observedCheckpoint.retryBudgetRemaining > 0
-        val nextCheckpoint = transitionCheckpoint(observedCheckpoint, decision, retryAvailable, evidence)
-        checkpointStore.saveCheckpoint(nextCheckpoint)
-
-        val madeProgress = currentFingerprint.isNotBlank() &&
-            prior.previousUiFingerprint.isNotBlank() &&
-            currentFingerprint != prior.previousUiFingerprint
-        val nextState = prior.copy(
-            previousUiFingerprint = currentFingerprint.ifBlank { prior.previousUiFingerprint },
-            identicalUiSamples = identical,
-            recoveryAttempts = prior.recoveryAttempts + if (retryAvailable && decision.terminalForStep) 1 else 0,
-            lastProgressAtEpochMs = if (madeProgress) observation.nowEpochMs else prior.lastProgressAtEpochMs,
-            lastObservedAtEpochMs = observation.nowEpochMs,
-            lastSignal = decision.signal,
-            lastEvidencePath = evidence?.file?.absolutePath ?: prior.lastEvidencePath,
-            lastEvidenceSha256 = evidence?.sha256 ?: prior.lastEvidenceSha256,
-        )
-        watchdogStore.save(nextState)
-
-        return WatchdogOutcome(
+        return persistDecision(
+            checkpoint = observedCheckpoint,
+            prior = prior,
             decision = decision,
             observation = collected,
-            checkpoint = nextCheckpoint,
-            state = nextState,
-            evidence = evidence,
-            recoveryRecommended = retryAvailable && decision.terminalForStep,
+            currentFingerprint = currentFingerprint,
+            identicalUiSamples = identical,
+        )
+    }
+
+    suspend fun recordFailure(
+        checkpoint: AgentCheckpoint,
+        detail: String,
+        mayRetry: Boolean,
+    ): WatchdogOutcome {
+        val prior = watchdogStore.load(checkpoint.runId) ?: AgentWatchdogState(runId = checkpoint.runId)
+        val decision = AgentOracle.actionFailure(detail, mayRetry)
+        return persistDecision(
+            checkpoint = checkpoint.copy(updatedAtEpochMs = System.currentTimeMillis()),
+            prior = prior,
+            decision = decision,
+            observation = null,
+            currentFingerprint = checkpoint.uiFingerprint,
+            identicalUiSamples = prior.identicalUiSamples,
         )
     }
 
@@ -160,6 +152,49 @@ class AgentWatchdog(
 
     fun clear(runId: String) = watchdogStore.clear(runId)
 
+    private suspend fun persistDecision(
+        checkpoint: AgentCheckpoint,
+        prior: AgentWatchdogState,
+        decision: OracleDecision,
+        observation: CollectedAgentObservation?,
+        currentFingerprint: String,
+        identicalUiSamples: Int,
+    ): WatchdogOutcome {
+        // Capture before changing run state or consuming the recovery budget.
+        val evidence = if (decision.captureEvidence) {
+            runCatching { evidenceCollector.capture(checkpoint, decision) }.getOrNull()
+        } else null
+
+        val retryAvailable = decision.mayRetry && checkpoint.retryBudgetRemaining > 0
+        val nextCheckpoint = transitionCheckpoint(checkpoint, decision, retryAvailable, evidence)
+        checkpointStore.saveCheckpoint(nextCheckpoint)
+
+        val now = observation?.observation?.nowEpochMs ?: System.currentTimeMillis()
+        val madeProgress = currentFingerprint.isNotBlank() &&
+            prior.previousUiFingerprint.isNotBlank() &&
+            currentFingerprint != prior.previousUiFingerprint
+        val nextState = prior.copy(
+            previousUiFingerprint = currentFingerprint.ifBlank { prior.previousUiFingerprint },
+            identicalUiSamples = identicalUiSamples,
+            recoveryAttempts = prior.recoveryAttempts + if (retryAvailable && decision.terminalForStep) 1 else 0,
+            lastProgressAtEpochMs = if (madeProgress) now else prior.lastProgressAtEpochMs,
+            lastObservedAtEpochMs = now,
+            lastSignal = decision.signal,
+            lastEvidencePath = evidence?.file?.absolutePath ?: prior.lastEvidencePath,
+            lastEvidenceSha256 = evidence?.sha256 ?: prior.lastEvidenceSha256,
+        )
+        watchdogStore.save(nextState)
+
+        return WatchdogOutcome(
+            decision = decision,
+            observation = observation,
+            checkpoint = nextCheckpoint,
+            state = nextState,
+            evidence = evidence,
+            recoveryRecommended = retryAvailable && decision.terminalForStep,
+        )
+    }
+
     private fun transitionCheckpoint(
         checkpoint: AgentCheckpoint,
         decision: OracleDecision,
@@ -174,7 +209,8 @@ class AgentWatchdog(
             OracleSignal.WRONG_FOREGROUND_PACKAGE -> AgentRunState.PAUSED_UNEXPECTED_SCREEN
             OracleSignal.USER_INTERVENED,
             OracleSignal.ADB_DISCONNECTED -> AgentRunState.PAUSED_SAFETY_BOUNDARY
-            OracleSignal.DEADLINE_EXCEEDED -> if (retryAvailable) AgentRunState.PAUSED_SAFETY_BOUNDARY else AgentRunState.FAILED
+            OracleSignal.DEADLINE_EXCEEDED,
+            OracleSignal.ACTION_FAILED -> if (retryAvailable) AgentRunState.PAUSED_SAFETY_BOUNDARY else AgentRunState.FAILED
             OracleSignal.APP_PROCESS_DIED,
             OracleSignal.ANR_OR_CRASH_DIALOG -> AgentRunState.FAILED
             OracleSignal.UI_FROZEN,
