@@ -2,7 +2,7 @@ name: Build APKbox
 
 on:
   push:
-    branches: [main, feature/remote-debug-bridge]
+    branches: [main, feature/remote-debug-bridge, feature/screen-agent]
   workflow_dispatch:
 
 concurrency:
