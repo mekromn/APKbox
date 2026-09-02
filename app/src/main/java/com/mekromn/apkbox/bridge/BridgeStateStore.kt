@@ -30,6 +30,7 @@ class BridgeStateStore(context: Context) {
     private val pendingFile = File(root, "pending.json")
     private val popupFile = File(root, "popup.json")
     private val eventsFile = File(root, "events.json")
+    private val completedDir = File(root, "completed").apply { mkdirs() }
 
     private val _events = MutableStateFlow(loadEvents())
     val events: StateFlow<List<BridgeEvent>> = _events.asStateFlow()
@@ -47,6 +48,30 @@ class BridgeStateStore(context: Context) {
     @Synchronized
     fun clearPending() {
         pendingFile.delete()
+    }
+
+    @Synchronized
+    fun saveCompleted(completed: BridgeCompletedEnvelope) {
+        atomicWrite(completedFile(completed.request.id), completed.toJson().toString())
+    }
+
+    @Synchronized
+    fun loadCompleted(): List<BridgeCompletedEnvelope> = completedDir.listFiles()
+        .orEmpty()
+        .asSequence()
+        .filter { it.isFile && it.extension == "json" }
+        .sortedBy { it.lastModified() }
+        .mapNotNull { file ->
+            runCatching { BridgeCompletedEnvelope.fromJson(JSONObject(file.readText())) }.getOrNull()
+        }
+        .toList()
+
+    @Synchronized
+    fun hasCompleted(requestId: String): Boolean = completedFile(requestId).isFile
+
+    @Synchronized
+    fun clearCompleted(requestId: String) {
+        completedFile(requestId).delete()
     }
 
     @Synchronized
@@ -123,6 +148,9 @@ class BridgeStateStore(context: Context) {
         }
         atomicWrite(eventsFile, array.toString())
     }
+
+    private fun completedFile(requestId: String) =
+        File(completedDir, requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".json")
 
     private fun atomicWrite(target: File, text: String) {
         target.parentFile?.mkdirs()
