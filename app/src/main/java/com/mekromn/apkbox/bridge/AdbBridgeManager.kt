@@ -1,6 +1,8 @@
 package com.mekromn.apkbox.bridge
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +11,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
@@ -22,6 +26,13 @@ data class AdbBridgeStatus(
     val connecting: Boolean = false,
     val host: String = "127.0.0.1",
     val lastConnectedAtEpochMs: Long = 0L,
+    val lastVerifiedAtEpochMs: Long = 0L,
+    val healPhase: AdbHealPhase = AdbHealPhase.DISCONNECTED,
+    val consecutiveFailures: Int = 0,
+    val nextRetryAtEpochMs: Long = 0L,
+    val wifiAvailable: Boolean = true,
+    val userActionRequired: Boolean = false,
+    val lastFailureKind: AdbHealFailureKind = AdbHealFailureKind.NONE,
     val lastError: String = "",
 )
 
@@ -30,13 +41,19 @@ class AdbBridgeManager(context: Context) {
         private const val MAX_OUTPUT_BYTES = 4 * 1024 * 1024
         private const val MAX_RAW_BYTES = 16 * 1024 * 1024
         private const val EXIT_MARKER = "__APKBOX_EXIT__="
+        private const val HEALTH_MARKER = "__APKBOX_ADB_HEALTHY__"
+        private const val HEALTH_PROBE_INTERVAL_MS = 30_000L
     }
 
     private val appContext = context.applicationContext
+    private val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
     private val identity = AdbIdentityStore(appContext).loadOrCreate()
     private val connection = ApkBoxAdbConnectionManager(identity)
+    private val healMutex = Mutex()
     private val _status = MutableStateFlow(AdbBridgeStatus())
     val status: StateFlow<AdbBridgeStatus> = _status.asStateFlow()
+
+    @Volatile private var lastKnownPort: Int = 0
 
     init {
         connection.setApi(Build.VERSION.SDK_INT)
@@ -49,119 +66,239 @@ class AdbBridgeManager(context: Context) {
     suspend fun pair(port: Int, pairingCode: String): Boolean = withContext(Dispatchers.IO) {
         require(port in 1..65535) { "Enter the Wireless debugging pairing port." }
         require(pairingCode.matches(Regex("\\d{6}"))) { "Pairing code must be six digits." }
-        runCatching { connection.pair("127.0.0.1", port, pairingCode) }
-            .onSuccess { paired ->
-                _status.value = _status.value.copy(lastError = if (paired) "" else "Pairing was not accepted.")
-            }
-            .onFailure { failure ->
-                _status.value = _status.value.copy(lastError = failure.message ?: failure.javaClass.simpleName)
-            }
-            .getOrDefault(false)
+        healMutex.withLock {
+            runCatching { connection.pair("127.0.0.1", port, pairingCode) }
+                .onSuccess { paired ->
+                    if (paired) {
+                        _status.value = _status.value.copy(
+                            userActionRequired = false,
+                            consecutiveFailures = 0,
+                            nextRetryAtEpochMs = 0L,
+                            lastFailureKind = AdbHealFailureKind.NONE,
+                            lastError = "",
+                        )
+                    } else {
+                        recordHealFailure("Pairing was not accepted.")
+                    }
+                }
+                .onFailure(::recordHealFailure)
+                .getOrDefault(false)
+        }
     }
 
-    suspend fun autoConnect(timeoutMs: Long = 7_000L): Boolean = withContext(Dispatchers.IO) {
-        if (connection.isConnected) {
-            refreshStatus()
-            return@withContext true
-        }
-        _status.value = _status.value.copy(connecting = true, lastError = "")
-        runCatching {
-            connection.connectTls(appContext, timeoutMs)
-            connection.isConnected
-        }.onSuccess { connected ->
-            _status.value = AdbBridgeStatus(
-                connected = connected,
-                connecting = false,
-                host = connection.hostAddress,
-                lastConnectedAtEpochMs = if (connected) System.currentTimeMillis() else 0L,
-                lastError = if (connected) "" else "Wireless ADB was not discovered.",
-            )
-        }.onFailure { failure ->
-            _status.value = _status.value.copy(
-                connected = false,
-                connecting = false,
-                lastError = failure.message ?: failure.javaClass.simpleName,
-            )
-        }.getOrDefault(false)
-    }
+    /**
+     * Compatibility entry point used by existing bridge UI/service. It now goes through the same
+     * self-healing state machine as background recovery rather than starting a separate connection
+     * path.
+     */
+    suspend fun autoConnect(timeoutMs: Long = 7_000L): Boolean =
+        autoHeal(force = true, timeoutMs = timeoutMs)
 
     suspend fun connect(port: Int): Boolean = withContext(Dispatchers.IO) {
         require(port in 1..65535) { "Invalid ADB connection port." }
-        _status.value = _status.value.copy(connecting = true, lastError = "")
-        runCatching {
-            connection.connect("127.0.0.1", port)
-            connection.isConnected
-        }.onSuccess { connected ->
-            _status.value = AdbBridgeStatus(
-                connected = connected,
-                connecting = false,
-                host = connection.hostAddress,
-                lastConnectedAtEpochMs = if (connected) System.currentTimeMillis() else 0L,
-                lastError = if (connected) "" else "ADB connection failed.",
+        healMutex.withLock {
+            _status.value = _status.value.copy(
+                connecting = true,
+                healPhase = AdbHealPhase.REDISCOVERING,
+                userActionRequired = false,
+                lastError = "",
             )
-        }.onFailure { failure ->
+            runCatching {
+                runCatching { connection.disconnect() }
+                connection.connect("127.0.0.1", port)
+                check(connection.isConnected) { "ADB connection failed." }
+                check(probeConnection()) { "ADB connected but health probe failed." }
+                lastKnownPort = port
+                markHealthy()
+                true
+            }.onFailure(::recordHealFailure).getOrDefault(false)
+        }
+    }
+
+    /**
+     * Self-healing Wireless ADB state machine. It verifies an existing idle connection, rediscoveries
+     * Android's dynamic TLS service through mDNS, optionally tries the last explicit connection port,
+     * applies bounded exponential backoff, and stops noisy retries only for a genuine authorization
+     * failure or when Wi-Fi is unavailable.
+     */
+    suspend fun autoHeal(
+        force: Boolean = false,
+        timeoutMs: Long = 7_000L,
+    ): Boolean = withContext(Dispatchers.IO) {
+        healMutex.withLock {
+            val now = System.currentTimeMillis()
+            val wifi = wifiAvailable()
+            if (!wifi) {
+                runCatching { connection.disconnect() }
+                _status.value = _status.value.copy(
+                    connected = false,
+                    connecting = false,
+                    wifiAvailable = false,
+                    healPhase = AdbHealPhase.WAITING_FOR_WIFI,
+                    lastError = "Waiting for Wi-Fi before Wireless ADB rediscovery.",
+                )
+                return@withLock false
+            }
+
+            if (_status.value.userActionRequired && !force) {
+                _status.value = _status.value.copy(
+                    connected = connection.isConnected,
+                    connecting = false,
+                    wifiAvailable = true,
+                    healPhase = AdbHealPhase.USER_ACTION_REQUIRED,
+                )
+                return@withLock false
+            }
+
+            if (connection.isConnected) {
+                if (!force && !AdbAutoHealPolicy.shouldProbe(
+                        _status.value.lastVerifiedAtEpochMs,
+                        now,
+                        HEALTH_PROBE_INTERVAL_MS,
+                    )
+                ) {
+                    refreshStatus()
+                    return@withLock true
+                }
+
+                _status.value = _status.value.copy(
+                    connecting = false,
+                    wifiAvailable = true,
+                    healPhase = AdbHealPhase.VERIFYING,
+                )
+                if (runCatching { probeConnection() }.getOrDefault(false)) {
+                    markHealthy()
+                    return@withLock true
+                }
+                runCatching { connection.disconnect() }
+            }
+
+            val current = _status.value
+            if (!force && current.nextRetryAtEpochMs > now) {
+                _status.value = current.copy(
+                    connected = false,
+                    connecting = false,
+                    wifiAvailable = true,
+                    healPhase = AdbHealPhase.BACKOFF,
+                )
+                return@withLock false
+            }
+
+            if (force) {
+                _status.value = current.copy(
+                    userActionRequired = false,
+                    nextRetryAtEpochMs = 0L,
+                )
+            }
             _status.value = _status.value.copy(
                 connected = false,
-                connecting = false,
-                lastError = failure.message ?: failure.javaClass.simpleName,
+                connecting = true,
+                wifiAvailable = true,
+                healPhase = AdbHealPhase.REDISCOVERING,
+                lastError = "",
             )
-        }.getOrDefault(false)
+
+            val discovery = runCatching {
+                runCatching { connection.disconnect() }
+                connection.connectTls(appContext, timeoutMs.coerceIn(2_000L, 20_000L))
+                check(connection.isConnected) { "Wireless ADB was not discovered." }
+                check(probeConnection()) { "Wireless ADB TLS connection failed its health probe." }
+                markHealthy()
+                true
+            }
+            if (discovery.getOrNull() == true) return@withLock true
+
+            val discoveryFailure = discovery.exceptionOrNull()
+            // An explicit port is only a fallback. Android can rotate the Wireless Debugging port,
+            // so a stale port failing here never turns into a pairing-required conclusion by itself.
+            if (lastKnownPort in 1..65535) {
+                val fallback = runCatching {
+                    runCatching { connection.disconnect() }
+                    connection.connect("127.0.0.1", lastKnownPort)
+                    check(connection.isConnected) { "Last-known ADB port is no longer active." }
+                    check(probeConnection()) { "Last-known ADB port failed its health probe." }
+                    markHealthy()
+                    true
+                }
+                if (fallback.getOrNull() == true) return@withLock true
+                recordHealFailure(fallback.exceptionOrNull() ?: discoveryFailure ?: IllegalStateException("Wireless ADB reconnect failed."))
+            } else {
+                recordHealFailure(discoveryFailure ?: IllegalStateException("Wireless ADB reconnect failed."))
+            }
+            false
+        }
     }
 
     fun disconnect() {
         runCatching { connection.disconnect() }
-        refreshStatus()
+        _status.value = _status.value.copy(
+            connected = false,
+            connecting = false,
+            healPhase = AdbHealPhase.DISCONNECTED,
+            lastError = "",
+        )
     }
 
     suspend fun ensureConnected(): Boolean {
-        if (connection.isConnected) return true
-        return autoConnect()
+        val now = System.currentTimeMillis()
+        if (connection.isConnected &&
+            !AdbAutoHealPolicy.shouldProbe(_status.value.lastVerifiedAtEpochMs, now, HEALTH_PROBE_INTERVAL_MS)
+        ) {
+            return true
+        }
+        return autoHeal(force = false)
     }
 
     suspend fun execute(command: String, timeoutSeconds: Int = 20): BridgeShellResult = withContext(Dispatchers.IO) {
         require(command.isNotBlank()) { "Command is empty." }
-        check(ensureConnected()) { "Wireless ADB is not connected." }
+        check(ensureConnected()) { healFailureMessage() }
 
         val started = System.currentTimeMillis()
-        val wrapped = buildString {
-            append(command.trim())
-            append("\n__apkbox_rc=$?\nprintf '\\n")
-            append(EXIT_MARKER)
-            append("%d\\n' \"\$__apkbox_rc\"")
-        }
-
-        val stream = connection.openStream("shell:$wrapped")
         try {
-            coroutineScope {
-                val reader = async(Dispatchers.IO) {
-                    val (bytes, truncated) = readBounded(stream.openInputStream(), MAX_OUTPUT_BYTES)
-                    String(bytes, Charsets.UTF_8) to truncated
-                }
-                try {
-                    val (rawOutput, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
-                        reader.await()
-                    }
-                    val parsed = parseExitCode(rawOutput)
-                    BridgeShellResult(
-                        output = parsed.first,
-                        exitCode = parsed.second,
-                        durationMs = System.currentTimeMillis() - started,
-                        truncated = truncated,
-                    )
-                } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
-                    runCatching { stream.close() }
-                    reader.cancel()
-                    BridgeShellResult(
-                        output = "Command timed out after ${timeoutSeconds.coerceIn(1, 120)} seconds.",
-                        exitCode = null,
-                        durationMs = System.currentTimeMillis() - started,
-                        timedOut = true,
-                    )
-                }
+            val wrapped = buildString {
+                append(command.trim())
+                append("\n__apkbox_rc=$?\nprintf '\\n")
+                append(EXIT_MARKER)
+                append("%d\\n' \"\$__apkbox_rc\"")
             }
-        } finally {
-            runCatching { stream.close() }
-            refreshStatus()
+
+            val stream = connection.openStream("shell:$wrapped")
+            try {
+                coroutineScope {
+                    val reader = async(Dispatchers.IO) {
+                        val (bytes, truncated) = readBounded(stream.openInputStream(), MAX_OUTPUT_BYTES)
+                        String(bytes, Charsets.UTF_8) to truncated
+                    }
+                    try {
+                        val (rawOutput, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
+                            reader.await()
+                        }
+                        val parsed = parseExitCode(rawOutput)
+                        markHealthy()
+                        BridgeShellResult(
+                            output = parsed.first,
+                            exitCode = parsed.second,
+                            durationMs = System.currentTimeMillis() - started,
+                            truncated = truncated,
+                        )
+                    } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                        runCatching { stream.close() }
+                        reader.cancel()
+                        BridgeShellResult(
+                            output = "Command timed out after ${timeoutSeconds.coerceIn(1, 120)} seconds.",
+                            exitCode = null,
+                            durationMs = System.currentTimeMillis() - started,
+                            timedOut = true,
+                        )
+                    }
+                }
+            } finally {
+                runCatching { stream.close() }
+                refreshStatus()
+            }
+        } catch (failure: Throwable) {
+            noteTransportFailure(failure)
+            throw failure
         }
     }
 
@@ -172,49 +309,140 @@ class AdbBridgeManager(context: Context) {
     ): BridgeRawResult = withContext(Dispatchers.IO) {
         require(command.isNotBlank()) { "Command is empty." }
         require(maxBytes in 1..MAX_RAW_BYTES) { "Raw capture size must be 1..$MAX_RAW_BYTES bytes." }
-        check(ensureConnected()) { "Wireless ADB is not connected." }
+        check(ensureConnected()) { healFailureMessage() }
 
         val started = System.currentTimeMillis()
-        val stream = connection.openStream("shell:${command.trim()}")
         try {
-            coroutineScope {
-                val reader = async(Dispatchers.IO) { readBounded(stream.openInputStream(), maxBytes) }
-                try {
-                    val (bytes, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
-                        reader.await()
+            val stream = connection.openStream("shell:${command.trim()}")
+            try {
+                coroutineScope {
+                    val reader = async(Dispatchers.IO) { readBounded(stream.openInputStream(), maxBytes) }
+                    try {
+                        val (bytes, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
+                            reader.await()
+                        }
+                        markHealthy()
+                        BridgeRawResult(
+                            bytes = bytes,
+                            durationMs = System.currentTimeMillis() - started,
+                            truncated = truncated,
+                        )
+                    } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                        runCatching { stream.close() }
+                        reader.cancel()
+                        BridgeRawResult(
+                            bytes = ByteArray(0),
+                            durationMs = System.currentTimeMillis() - started,
+                            timedOut = true,
+                        )
                     }
-                    BridgeRawResult(
-                        bytes = bytes,
-                        durationMs = System.currentTimeMillis() - started,
-                        truncated = truncated,
-                    )
-                } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
-                    runCatching { stream.close() }
-                    reader.cancel()
-                    BridgeRawResult(
-                        bytes = ByteArray(0),
-                        durationMs = System.currentTimeMillis() - started,
-                        timedOut = true,
-                    )
                 }
+            } finally {
+                runCatching { stream.close() }
+                refreshStatus()
             }
-        } finally {
-            runCatching { stream.close() }
-            refreshStatus()
+        } catch (failure: Throwable) {
+            noteTransportFailure(failure)
+            throw failure
         }
     }
 
     fun refreshStatus() {
         val connected = connection.isConnected
-        _status.value = _status.value.copy(
+        val current = _status.value
+        _status.value = current.copy(
             connected = connected,
             connecting = false,
             host = connection.hostAddress,
-            lastConnectedAtEpochMs = if (connected && _status.value.lastConnectedAtEpochMs == 0L) {
+            wifiAvailable = wifiAvailable(),
+            healPhase = when {
+                connected && current.healPhase !in setOf(AdbHealPhase.VERIFYING, AdbHealPhase.REDISCOVERING) -> AdbHealPhase.HEALTHY
+                !connected && current.userActionRequired -> AdbHealPhase.USER_ACTION_REQUIRED
+                else -> current.healPhase
+            },
+            lastConnectedAtEpochMs = if (connected && current.lastConnectedAtEpochMs == 0L) {
                 System.currentTimeMillis()
-            } else _status.value.lastConnectedAtEpochMs,
+            } else current.lastConnectedAtEpochMs,
         )
     }
+
+    private suspend fun probeConnection(): Boolean {
+        if (!connection.isConnected) return false
+        val stream = connection.openStream("shell:printf $HEALTH_MARKER")
+        return try {
+            val bytes = withTimeout(4_000L) {
+                val (payload, _) = readBounded(stream.openInputStream(), 4 * 1024)
+                payload
+            }
+            String(bytes, Charsets.UTF_8).contains(HEALTH_MARKER)
+        } finally {
+            runCatching { stream.close() }
+        }
+    }
+
+    private fun markHealthy() {
+        val now = System.currentTimeMillis()
+        val current = _status.value
+        _status.value = current.copy(
+            connected = true,
+            connecting = false,
+            host = connection.hostAddress,
+            lastConnectedAtEpochMs = if (current.connected && current.lastConnectedAtEpochMs > 0L) {
+                current.lastConnectedAtEpochMs
+            } else now,
+            lastVerifiedAtEpochMs = now,
+            healPhase = AdbHealPhase.HEALTHY,
+            consecutiveFailures = 0,
+            nextRetryAtEpochMs = 0L,
+            wifiAvailable = true,
+            userActionRequired = false,
+            lastFailureKind = AdbHealFailureKind.NONE,
+            lastError = "",
+        )
+    }
+
+    private fun noteTransportFailure(failure: Throwable) {
+        runCatching { connection.disconnect() }
+        recordHealFailure(failure)
+    }
+
+    private fun recordHealFailure(failure: Throwable) =
+        recordHealFailure(failure.message ?: failure.javaClass.simpleName)
+
+    private fun recordHealFailure(message: String) {
+        val now = System.currentTimeMillis()
+        val current = _status.value
+        val failures = current.consecutiveFailures + 1
+        val kind = AdbAutoHealPolicy.failureKind(message)
+        val actionRequired = AdbAutoHealPolicy.requiresUserAction(kind)
+        _status.value = current.copy(
+            connected = false,
+            connecting = false,
+            healPhase = if (actionRequired) AdbHealPhase.USER_ACTION_REQUIRED else AdbHealPhase.BACKOFF,
+            consecutiveFailures = failures,
+            nextRetryAtEpochMs = if (actionRequired) 0L else now + AdbAutoHealPolicy.backoffMs(failures),
+            wifiAvailable = wifiAvailable(),
+            userActionRequired = actionRequired,
+            lastFailureKind = kind,
+            lastError = message.take(1_000),
+        )
+    }
+
+    private fun healFailureMessage(): String {
+        val state = _status.value
+        return when (state.healPhase) {
+            AdbHealPhase.WAITING_FOR_WIFI -> "Wireless ADB is waiting for Wi-Fi."
+            AdbHealPhase.USER_ACTION_REQUIRED -> "Wireless ADB authorization needs attention: ${state.lastError}"
+            AdbHealPhase.BACKOFF -> "Wireless ADB reconnect is backing off after ${state.consecutiveFailures} failures: ${state.lastError}"
+            else -> "Wireless ADB is not connected${state.lastError.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}."
+        }
+    }
+
+    private fun wifiAvailable(): Boolean = runCatching {
+        connectivity.allNetworks.any { network ->
+            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }
+    }.getOrDefault(true)
 
     private fun readBounded(input: java.io.InputStream, limit: Int): Pair<ByteArray, Boolean> {
         input.use {
