@@ -48,6 +48,7 @@ class AgentRecoveryExecutor(
             OracleSignal.BLACK_OR_BLANK_SCREEN,
             OracleSignal.DEADLINE_EXCEEDED -> softRelaunch(checkpoint)
 
+            OracleSignal.ACTION_FAILED,
             OracleSignal.CONTROLLER_LOST,
             OracleSignal.WRONG_FOREGROUND_PACKAGE,
             OracleSignal.USER_INTERVENED,
@@ -57,7 +58,7 @@ class AgentRecoveryExecutor(
                 action = RecoveryAction.NONE,
                 attempted = false,
                 recovered = false,
-                detail = "${decision.signal.name} requires controller/user/build-runner handling rather than automatic UI recovery.",
+                detail = "${decision.signal.name} requires controller/user/plan-runner handling rather than automatic UI recovery.",
             )
         }
     }
