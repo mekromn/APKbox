@@ -1,14 +1,18 @@
 package com.mekromn.apkbox.bridge
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -66,6 +70,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.ApkBoxServices
@@ -86,6 +91,20 @@ class BridgeActivity : ComponentActivity() {
     private val busy = MutableStateFlow(false)
     private val message = MutableStateFlow("")
     private val consoleOutput = MutableStateFlow("")
+    private var enableAfterNotificationGrant = false
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!enableAfterNotificationGrant) return@registerForActivityResult
+        enableAfterNotificationGrant = false
+        if (granted) {
+            enableBridgeNow()
+        } else {
+            prefs.setEnabled(false)
+            message.value = "Remote Bridge was not enabled. Approval notifications are required so remote commands can never wait invisibly for permission."
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -135,14 +154,30 @@ class BridgeActivity : ComponentActivity() {
     }
 
     private fun setBridgeEnabled(enabled: Boolean) {
-        prefs.setEnabled(enabled)
-        if (enabled) {
-            RemoteBridgeService.start(this)
-            message.value = "Remote Bridge enabled."
-        } else {
+        if (!enabled) {
+            prefs.setEnabled(false)
             RemoteBridgeService.stop(this)
             message.value = "Remote Bridge disabled."
+            return
         }
+
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            prefs.setEnabled(false)
+            enableAfterNotificationGrant = true
+            message.value = "Allow notifications so APKbox can always surface ChatGPT command approvals."
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        enableBridgeNow()
+    }
+
+    private fun enableBridgeNow() {
+        prefs.setEnabled(true)
+        RemoteBridgeService.start(this)
+        message.value = "Remote Bridge enabled. Approval prompts will stay visible in notifications."
     }
 
     private fun pairAdb(portText: String, code: String) {
@@ -323,7 +358,7 @@ private fun BridgeScreen(
 
             BridgeCard(Icons.Rounded.Link, "1 · Pair this phone's Wireless ADB") {
                 Text(
-                    "Open Developer options → Wireless debugging → Pair device with pairing code. Enter the temporary pairing port and six-digit code below. APKbox keeps its ADB private key in Android Keystore.",
+                    "Open Developer options → Wireless debugging → Pair device with pairing code. Enter the temporary pairing port and six-digit code below. APKbox keeps the ADB private identity AES-GCM encrypted at rest by Android Keystore.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -444,7 +479,7 @@ private fun BridgeScreen(
                     color = if (trusted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    "A trusted session auto-approves read-only diagnostics and app launches. Mutating commands and arbitrary dangerous shell commands still require a fresh approval every time.",
+                    "A trusted session auto-approves structured logcats/dumpsys/app launches and the strict read-only shell allowlist. Mutating, composed, unknown, and arbitrary shell commands still require a fresh approval every time.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
