@@ -169,7 +169,7 @@ private fun ApprovalScreen(
             Text(
                 when (pending.risk) {
                     BridgeRisk.READ_ONLY -> "Read-only debugging can be covered by a temporary trusted session."
-                    BridgeRisk.DEBUG_ACTION -> "Debug actions such as launching an app can be covered by a temporary trusted session."
+                    BridgeRisk.DEBUG_ACTION -> "Debug actions and package-scoped UI control can be covered by a temporary trusted session."
                     BridgeRisk.INFO -> "This is informational only and does not receive shell privileges."
                     BridgeRisk.MUTATING -> "This can change device or app state. APKbox never auto-approves it."
                     BridgeRisk.DANGEROUS -> "This is arbitrary or high-risk shell access. APKbox never auto-approves it."
@@ -220,4 +220,12 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.TOAST -> "Show a toast message on your phone"
     BridgeCommandType.NOTIFICATION -> "Post a notification on your phone"
     BridgeCommandType.POPUP -> "Show a ChatGPT instruction popup"
+    BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy${request.packageName.takeIf { it.isNotBlank() }?.let { " for $it" }.orEmpty()}"
+    BridgeCommandType.SCREENSHOT -> "Capture the current screen as a private Continuity artifact"
+    BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) inside ${request.packageName}"
+    BridgeCommandType.UI_FIND_TAP -> "Find and tap '${request.selector}' inside ${request.packageName}"
+    BridgeCommandType.UI_SWIPE -> "Swipe inside ${request.packageName} from (${request.x}, ${request.y}) to (${request.endX}, ${request.endY})"
+    BridgeCommandType.UI_TEXT -> "Type text into the foreground ${request.packageName} UI"
+    BridgeCommandType.UI_KEY -> "Send Android key code ${request.keyCode} while ${request.packageName} is foreground"
+    BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
 }
