@@ -133,7 +133,7 @@ class AdbBridgeManager(context: Context) {
             append(command.trim())
             append("\n__apkbox_rc=$?\nprintf '\\n")
             append(EXIT_MARKER)
-            append("%d\\n' \"$__apkbox_rc\"")
+            append("%d\\n' \"\$__apkbox_rc\"")
         }
 
         val stream = connection.openStream("shell:$wrapped")
@@ -141,7 +141,6 @@ class AdbBridgeManager(context: Context) {
             coroutineScope {
                 val reader = async(Dispatchers.IO) {
                     val accumulator = ByteArrayOutputStream(min(MAX_OUTPUT_BYTES, 256 * 1024))
-                    var total = 0
                     var truncated = false
                     val buffer = ByteArray(64 * 1024)
                     stream.openInputStream().use { input ->
@@ -149,7 +148,6 @@ class AdbBridgeManager(context: Context) {
                             val count = input.read(buffer)
                             if (count < 0) break
                             if (count == 0) continue
-                            total += count
                             if (accumulator.size() < MAX_OUTPUT_BYTES) {
                                 val allowed = min(count, MAX_OUTPUT_BYTES - accumulator.size())
                                 accumulator.write(buffer, 0, allowed)
