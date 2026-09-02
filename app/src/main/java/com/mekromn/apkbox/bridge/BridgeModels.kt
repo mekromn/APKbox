@@ -117,6 +117,20 @@ data class BridgeResult(
         .put("durationMs", durationMs)
         .put("completedAtEpochMs", completedAtEpochMs)
         .put("truncated", truncated)
+
+    companion object {
+        fun fromJson(json: JSONObject): BridgeResult = BridgeResult(
+            requestId = json.getString("requestId"),
+            status = BridgeResultStatus.valueOf(json.getString("status")),
+            risk = BridgeRisk.valueOf(json.getString("risk")),
+            detail = json.optString("detail"),
+            output = json.optString("output"),
+            exitCode = if (json.isNull("exitCode")) null else json.optInt("exitCode"),
+            durationMs = json.optLong("durationMs"),
+            completedAtEpochMs = json.optLong("completedAtEpochMs", System.currentTimeMillis()),
+            truncated = json.optBoolean("truncated", false),
+        )
+    }
 }
 
 data class BridgePendingRequest(
@@ -137,6 +151,28 @@ data class BridgePendingRequest(
             risk = BridgeRisk.valueOf(json.getString("risk")),
             inboxPath = json.getString("inboxPath"),
             inboxSha = json.getString("inboxSha"),
+        )
+    }
+}
+
+data class BridgeCompletedEnvelope(
+    val request: BridgeRequest,
+    val inboxPath: String,
+    val inboxSha: String,
+    val result: BridgeResult,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("request", request.toJson())
+        .put("inboxPath", inboxPath)
+        .put("inboxSha", inboxSha)
+        .put("result", result.toJson("local-journal"))
+
+    companion object {
+        fun fromJson(json: JSONObject): BridgeCompletedEnvelope = BridgeCompletedEnvelope(
+            request = BridgeRequest.fromJson(json.getJSONObject("request")),
+            inboxPath = json.getString("inboxPath"),
+            inboxSha = json.getString("inboxSha"),
+            result = BridgeResult.fromJson(json.getJSONObject("result")),
         )
     }
 }
