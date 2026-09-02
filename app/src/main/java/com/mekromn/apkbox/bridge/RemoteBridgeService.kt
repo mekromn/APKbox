@@ -33,7 +33,9 @@ class RemoteBridgeService : Service() {
         private const val APPROVAL_CHANNEL = "apkbox-remote-bridge-approval"
         private const val SERVICE_NOTIFICATION_ID = 73_001
         private const val APPROVAL_NOTIFICATION_ID = 73_002
-        private const val HEARTBEAT_INTERVAL_MS = 60_000L
+        // state.json is a Git commit in the private Continuity relay. Write immediately when
+        // meaningful state changes, but only issue an unchanged liveness keepalive every six hours.
+        private const val HEARTBEAT_KEEPALIVE_MS = 6L * 60L * 60L * 1_000L
         private const val ADB_RECONNECT_INTERVAL_MS = 15_000L
 
         fun start(context: Context) {
@@ -62,6 +64,7 @@ class RemoteBridgeService : Service() {
     private var loopJob: Job? = null
     @Volatile private var forcePoll = false
     private var lastHeartbeat = 0L
+    private var lastHeartbeatFingerprint = ""
     private var lastAdbReconnect = 0L
 
     override fun onCreate() {
@@ -136,10 +139,15 @@ class RemoteBridgeService : Service() {
                 BridgeRuntime.update { it.copy(pendingRequestId = "") }
             }
 
-            if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+            val heartbeatFingerprint = heartbeatFingerprint(config)
+            val heartbeatDue = lastHeartbeat == 0L ||
+                heartbeatFingerprint != lastHeartbeatFingerprint ||
+                now - lastHeartbeat >= HEARTBEAT_KEEPALIVE_MS
+            if (heartbeatDue) {
                 runCatching { relay.heartbeat(config, token, adb.status.value) }
                     .onSuccess {
                         lastHeartbeat = now
+                        lastHeartbeatFingerprint = heartbeatFingerprint
                         BridgeRuntime.update { status ->
                             status.copy(relayReachable = true, lastHeartbeatEpochMs = now, lastError = "")
                         }
@@ -298,6 +306,17 @@ class RemoteBridgeService : Service() {
         if (now - lastAdbReconnect < ADB_RECONNECT_INTERVAL_MS) return
         lastAdbReconnect = now
         runCatching { adb.autoConnect() }
+    }
+
+    private fun heartbeatFingerprint(config: BridgeConfig): String = buildString {
+        append(config.enabled).append('|')
+        append(config.deviceId).append('|')
+        append(config.repoOwner).append('/').append(config.repoName).append('|')
+        append(config.paired).append('|')
+        append(adb.status.value.connected).append('|')
+        append(config.trustedUntilEpochMs).append('|')
+        append(config.allowInformational).append('|')
+        append(config.allowPopups)
     }
 
     private fun showApproval(pending: BridgePendingRequest) {
