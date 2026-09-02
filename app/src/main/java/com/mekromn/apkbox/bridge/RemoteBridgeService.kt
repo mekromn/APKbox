@@ -514,6 +514,7 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.UI_TEXT -> "Type text in ${request.packageName}"
         BridgeCommandType.UI_KEY -> "Send key ${request.keyCode} in ${request.packageName}"
         BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
+        BridgeCommandType.AGENT_START -> "Start autonomous run ${request.runId.ifBlank { request.packageName }}"
     }
 
     private fun recordRelayFailure(failure: Throwable) {
