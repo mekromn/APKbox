@@ -154,6 +154,9 @@ class BridgeExecutor(
                     screenAgent.waitFor(request.packageName, request.selector, request.timeoutSeconds),
                     started,
                 )
+                BridgeCommandType.AGENT_START -> error(
+                    "AGENT_START must be handled by RemoteBridgeService after fetching the approved plan from Continuity."
+                )
             }
         }.getOrElse { failure ->
             BridgeResult(
