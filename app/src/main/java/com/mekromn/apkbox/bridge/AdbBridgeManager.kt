@@ -28,6 +28,7 @@ data class AdbBridgeStatus(
 class AdbBridgeManager(context: Context) {
     companion object {
         private const val MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+        private const val MAX_RAW_BYTES = 16 * 1024 * 1024
         private const val EXIT_MARKER = "__APKBOX_EXIT__="
     }
 
@@ -48,15 +49,14 @@ class AdbBridgeManager(context: Context) {
     suspend fun pair(port: Int, pairingCode: String): Boolean = withContext(Dispatchers.IO) {
         require(port in 1..65535) { "Enter the Wireless debugging pairing port." }
         require(pairingCode.matches(Regex("\\d{6}"))) { "Pairing code must be six digits." }
-        runCatching {
-            connection.pair("127.0.0.1", port, pairingCode)
-        }.onSuccess { paired ->
-            _status.value = _status.value.copy(
-                lastError = if (paired) "" else "Pairing was not accepted.",
-            )
-        }.onFailure { failure ->
-            _status.value = _status.value.copy(lastError = failure.message ?: failure.javaClass.simpleName)
-        }.getOrDefault(false)
+        runCatching { connection.pair("127.0.0.1", port, pairingCode) }
+            .onSuccess { paired ->
+                _status.value = _status.value.copy(lastError = if (paired) "" else "Pairing was not accepted.")
+            }
+            .onFailure { failure ->
+                _status.value = _status.value.copy(lastError = failure.message ?: failure.javaClass.simpleName)
+            }
+            .getOrDefault(false)
     }
 
     suspend fun autoConnect(timeoutMs: Long = 7_000L): Boolean = withContext(Dispatchers.IO) {
@@ -134,24 +134,8 @@ class AdbBridgeManager(context: Context) {
         try {
             coroutineScope {
                 val reader = async(Dispatchers.IO) {
-                    val accumulator = ByteArrayOutputStream(min(MAX_OUTPUT_BYTES, 256 * 1024))
-                    var truncated = false
-                    val buffer = ByteArray(64 * 1024)
-                    stream.openInputStream().use { input ->
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            if (count == 0) continue
-                            if (accumulator.size() < MAX_OUTPUT_BYTES) {
-                                val allowed = min(count, MAX_OUTPUT_BYTES - accumulator.size())
-                                accumulator.write(buffer, 0, allowed)
-                                if (allowed < count) truncated = true
-                            } else {
-                                truncated = true
-                            }
-                        }
-                    }
-                    accumulator.toString(Charsets.UTF_8.name()) to truncated
+                    val (bytes, truncated) = readBounded(stream.openInputStream(), MAX_OUTPUT_BYTES)
+                    String(bytes, Charsets.UTF_8) to truncated
                 }
                 try {
                     val (rawOutput, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
@@ -181,6 +165,45 @@ class AdbBridgeManager(context: Context) {
         }
     }
 
+    suspend fun executeRaw(
+        command: String,
+        timeoutSeconds: Int = 20,
+        maxBytes: Int = MAX_RAW_BYTES,
+    ): BridgeRawResult = withContext(Dispatchers.IO) {
+        require(command.isNotBlank()) { "Command is empty." }
+        require(maxBytes in 1..MAX_RAW_BYTES) { "Raw capture size must be 1..$MAX_RAW_BYTES bytes." }
+        check(ensureConnected()) { "Wireless ADB is not connected." }
+
+        val started = System.currentTimeMillis()
+        val stream = connection.openStream("shell:${command.trim()}")
+        try {
+            coroutineScope {
+                val reader = async(Dispatchers.IO) { readBounded(stream.openInputStream(), maxBytes) }
+                try {
+                    val (bytes, truncated) = withTimeout(timeoutSeconds.coerceIn(1, 120) * 1_000L) {
+                        reader.await()
+                    }
+                    BridgeRawResult(
+                        bytes = bytes,
+                        durationMs = System.currentTimeMillis() - started,
+                        truncated = truncated,
+                    )
+                } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                    runCatching { stream.close() }
+                    reader.cancel()
+                    BridgeRawResult(
+                        bytes = ByteArray(0),
+                        durationMs = System.currentTimeMillis() - started,
+                        timedOut = true,
+                    )
+                }
+            }
+        } finally {
+            runCatching { stream.close() }
+            refreshStatus()
+        }
+    }
+
     fun refreshStatus() {
         val connected = connection.isConnected
         _status.value = _status.value.copy(
@@ -191,6 +214,27 @@ class AdbBridgeManager(context: Context) {
                 System.currentTimeMillis()
             } else _status.value.lastConnectedAtEpochMs,
         )
+    }
+
+    private fun readBounded(input: java.io.InputStream, limit: Int): Pair<ByteArray, Boolean> {
+        input.use {
+            val accumulator = ByteArrayOutputStream(min(limit, 256 * 1024))
+            var truncated = false
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = it.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                if (accumulator.size() < limit) {
+                    val allowed = min(count, limit - accumulator.size())
+                    accumulator.write(buffer, 0, allowed)
+                    if (allowed < count) truncated = true
+                } else {
+                    truncated = true
+                }
+            }
+            return accumulator.toByteArray() to truncated
+        }
     }
 
     private fun parseExitCode(raw: String): Pair<String, Int?> {
