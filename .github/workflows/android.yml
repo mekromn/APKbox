@@ -40,8 +40,6 @@ jobs:
       - name: Install Android 16 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      # The signing private key stays only in the Actions cache. This workflow intentionally does
-      # not run for pull_request events, so untrusted PR code never receives the cached key.
       - name: Restore APKbox development signing key
         uses: actions/cache@v4
         with:
@@ -73,9 +71,28 @@ jobs:
             -alias androiddebugkey | grep 'SHA256:'
 
       - name: Test and build debug APK
-        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace > "$RUNNER_TEMP/apkbox-build.log" 2>&1
+          status=$?
+          echo "--- APKbox build tail ---"
+          tail -n 220 "$RUNNER_TEMP/apkbox-build.log"
+          exit $status
+
+      - name: Upload bridge CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: APKbox-build-diagnostics
+          path: |
+            ${{ runner.temp }}/apkbox-build.log
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload APKbox debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: APKbox-debug
