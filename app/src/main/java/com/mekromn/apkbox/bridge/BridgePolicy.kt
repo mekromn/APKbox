@@ -90,10 +90,14 @@ object BridgePolicy {
     private fun classifyShell(raw: String): BridgeRisk {
         val command = raw.trim()
         if (command.isEmpty()) return BridgeRisk.DANGEROUS
-        val lower = " ${command.lowercase()} "
 
-        if (mutatingTokens.any { it in lower }) return BridgeRisk.MUTATING
+        // Any shell composition/chaining is high risk before looking at individual tokens. This
+        // prevents a command from inheriting a trusted-read classification by hiding a second
+        // operation behind ;, |, command substitution, redirection, or a newline.
         if (shellMetacharacters.containsMatchIn(command)) return BridgeRisk.DANGEROUS
+
+        val lower = " ${command.lowercase()} "
+        if (mutatingTokens.any { it in lower }) return BridgeRisk.MUTATING
 
         val normalized = command.lowercase().replace(Regex("\\s+"), " ").trim()
         if (normalized in readOnlyExact || readOnlyPrefixes.any { normalized.startsWith(it) }) {
