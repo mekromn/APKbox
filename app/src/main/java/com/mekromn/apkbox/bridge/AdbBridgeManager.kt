@@ -2,8 +2,6 @@ package com.mekromn.apkbox.bridge
 
 import android.content.Context
 import android.os.Build
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -14,13 +12,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
-import java.security.KeyPairGenerator
-import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.cert.Certificate
-import java.util.Date
 import java.util.concurrent.TimeUnit
-import javax.security.auth.x500.X500Principal
 import kotlin.math.min
 
 data class AdbBridgeStatus(
@@ -33,13 +27,13 @@ data class AdbBridgeStatus(
 
 class AdbBridgeManager(context: Context) {
     companion object {
-        private const val ADB_KEY_ALIAS = "apkbox-wireless-adb"
         private const val MAX_OUTPUT_BYTES = 4 * 1024 * 1024
         private const val EXIT_MARKER = "__APKBOX_EXIT__="
     }
 
     private val appContext = context.applicationContext
-    private val connection = ApkBoxAdbConnectionManager()
+    private val identity = AdbIdentityStore(appContext).loadOrCreate()
+    private val connection = ApkBoxAdbConnectionManager(identity)
     private val _status = MutableStateFlow(AdbBridgeStatus())
     val status: StateFlow<AdbBridgeStatus> = _status.asStateFlow()
 
@@ -207,40 +201,11 @@ class AdbBridgeManager(context: Context) {
         return raw.substring(0, markerIndex).trimEnd() to code
     }
 
-    private inner class ApkBoxAdbConnectionManager : AbsAdbConnectionManager() {
-        private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-
-        init {
-            ensureKey()
-        }
-
-        override fun getPrivateKey(): PrivateKey =
-            keyStore.getKey(ADB_KEY_ALIAS, null) as PrivateKey
-
-        override fun getCertificate(): Certificate =
-            keyStore.getCertificate(ADB_KEY_ALIAS)
-
+    private class ApkBoxAdbConnectionManager(
+        private val identity: AdbIdentityStore.Identity,
+    ) : AbsAdbConnectionManager() {
+        override fun getPrivateKey(): PrivateKey = identity.privateKey
+        override fun getCertificate(): Certificate = identity.certificate
         override fun getDeviceName(): String = "APKbox-${Build.MODEL}"
-
-        private fun ensureKey() {
-            if (keyStore.containsAlias(ADB_KEY_ALIAS)) return
-            val now = System.currentTimeMillis()
-            val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore")
-            generator.initialize(
-                KeyGenParameterSpec.Builder(
-                    ADB_KEY_ALIAS,
-                    KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
-                )
-                    .setKeySize(2048)
-                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                    .setCertificateSubject(X500Principal("CN=APKbox Wireless ADB Bridge"))
-                    .setCertificateSerialNumber(java.math.BigInteger.valueOf(now))
-                    .setCertificateNotBefore(Date(now - 60_000L))
-                    .setCertificateNotAfter(Date(now + 20L * 365L * 24L * 60L * 60L * 1_000L))
-                    .build()
-            )
-            generator.generateKeyPair()
-        }
     }
 }
