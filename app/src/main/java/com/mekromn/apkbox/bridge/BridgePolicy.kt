@@ -48,11 +48,18 @@ object BridgePolicy {
 
         BridgeCommandType.LOGCAT,
         BridgeCommandType.APP_LOGCAT,
-        BridgeCommandType.DUMPSYS -> BridgeRisk.READ_ONLY
+        BridgeCommandType.DUMPSYS,
+        BridgeCommandType.UI_SNAPSHOT,
+        BridgeCommandType.SCREENSHOT -> BridgeRisk.READ_ONLY
 
-        // The structured LAUNCH type is the only trusted-session stateful/debug action. APKbox
-        // builds that command itself from a validated package name.
-        BridgeCommandType.LAUNCH -> BridgeRisk.DEBUG_ACTION
+        BridgeCommandType.LAUNCH,
+        BridgeCommandType.UI_TAP,
+        BridgeCommandType.UI_FIND_TAP,
+        BridgeCommandType.UI_SWIPE,
+        BridgeCommandType.UI_TEXT,
+        BridgeCommandType.UI_KEY,
+        BridgeCommandType.UI_WAIT -> BridgeRisk.DEBUG_ACTION
+
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
 
@@ -69,26 +76,37 @@ object BridgePolicy {
                 BridgeCommandType.POPUP -> allowInformational && allowPopups
                 else -> allowInformational
             }
-            BridgeRisk.READ_ONLY,
-            BridgeRisk.DEBUG_ACTION -> trustedUntilEpochMs > now
+            BridgeRisk.READ_ONLY -> trustedUntilEpochMs > now
+            BridgeRisk.DEBUG_ACTION -> trustedUntilEpochMs > now && debugActionIsPackageScoped(request)
             BridgeRisk.MUTATING,
             BridgeRisk.DANGEROUS -> false
         }
     }
 
     fun trustedSessionEligible(request: BridgeRequest): Boolean = when (classify(request)) {
-        BridgeRisk.READ_ONLY,
-        BridgeRisk.DEBUG_ACTION -> true
+        BridgeRisk.READ_ONLY -> true
+        BridgeRisk.DEBUG_ACTION -> debugActionIsPackageScoped(request)
         else -> false
     }
+
+    private fun debugActionIsPackageScoped(request: BridgeRequest): Boolean = when (request.type) {
+        BridgeCommandType.LAUNCH -> validPackage(request.packageName)
+        BridgeCommandType.UI_TAP,
+        BridgeCommandType.UI_FIND_TAP,
+        BridgeCommandType.UI_SWIPE,
+        BridgeCommandType.UI_TEXT,
+        BridgeCommandType.UI_KEY,
+        BridgeCommandType.UI_WAIT -> validPackage(request.packageName)
+        else -> false
+    }
+
+    private fun validPackage(value: String): Boolean =
+        value.matches(Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+"))
 
     private fun classifyShell(raw: String): BridgeRisk {
         val command = raw.trim()
         if (command.isEmpty()) return BridgeRisk.DANGEROUS
 
-        // Any shell composition/chaining is high risk before looking at individual tokens. This
-        // prevents a command from inheriting a trusted-read classification by hiding a second
-        // operation behind ;, |, command substitution, redirection, or a newline.
         if (shellMetacharacters.containsMatchIn(command)) return BridgeRisk.DANGEROUS
 
         val lower = " ${command.lowercase()} "
@@ -99,9 +117,6 @@ object BridgePolicy {
             return BridgeRisk.READ_ONLY
         }
 
-        // Raw shell commands that do anything beyond the strict read-only allowlist always require
-        // a fresh approval, even during a trusted session. Use structured LAUNCH/LOGCAT/DUMPSYS for
-        // safe autonomous debugging operations.
         return BridgeRisk.DANGEROUS
     }
 }
