@@ -12,7 +12,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.mekromn.apkbox.ApkBoxServices
-import com.mekromn.apkbox.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -166,6 +165,8 @@ class RemoteBridgeService : Service() {
     private suspend fun pollInbox(config: BridgeConfig, token: String) {
         val items = relay.fetchInbox(config, token)
         for (item in items) {
+            // A completed journal means this request already executed. flushCompleted() will retry
+            // delivery/deletion; never execute it twice if GitHub was unavailable after execution.
             if (stateStore.hasCompleted(item.request.id)) continue
             val request = item.request
             val risk = BridgePolicy.classify(request)
@@ -210,8 +211,9 @@ class RemoteBridgeService : Service() {
                 success = true,
             )
             BridgeRuntime.update { it.copy(pendingRequestId = request.id) }
+            // High-importance approval notification produces Android's heads-up popup while keeping
+            // the actual approval activity non-exported. The notification contains inline actions.
             showApproval(pending)
-            scope.launch { executor.launchApprovalUi() }
             break
         }
     }
@@ -239,16 +241,16 @@ class RemoteBridgeService : Service() {
 
     private suspend fun flushCompleted(config: BridgeConfig, token: String) {
         for (completed in stateStore.loadCompleted()) {
+            // Order is deliberate. The journal survives until BOTH result delivery and inbox
+            // removal succeed. GitHubRelayClient treats only a genuine 404 inbox as already removed.
             relay.writeResult(config, token, completed.result)
-            runCatching {
-                relay.deleteInbox(
-                    config = config,
-                    token = token,
-                    path = completed.inboxPath,
-                    sha = completed.inboxSha,
-                    requestId = completed.request.id,
-                )
-            }
+            relay.deleteInbox(
+                config = config,
+                token = token,
+                path = completed.inboxPath,
+                sha = completed.inboxSha,
+                requestId = completed.request.id,
+            )
             stateStore.clearCompleted(completed.request.id)
         }
     }
@@ -339,6 +341,7 @@ class RemoteBridgeService : Service() {
             .setAutoCancel(false)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .addAction(0, "Deny", deny)
             .addAction(0, "Allow once", allowOnce)
 
@@ -417,6 +420,7 @@ class RemoteBridgeService : Service() {
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "Approval prompts for remote debugging commands"
+                enableVibration(true)
             }
         )
     }
