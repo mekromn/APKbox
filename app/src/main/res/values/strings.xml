@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pairing_assistant_description">One-shot helper that navigates Android Settings to the Wireless ADB pairing-code dialog, reads the temporary six-digit code locally, pairs APKbox, then disables itself.</string>
+</resources>
