@@ -83,4 +83,7 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // Android's local-unit-test android.jar contains a throwing org.json stub. Use the real JVM
+    // implementation so protocol round-trip tests exercise the same JSON semantics as the app.
+    testImplementation("org.json:json:20250517")
 }
