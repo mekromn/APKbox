@@ -34,13 +34,6 @@ object BridgePolicy {
         "wc ",
     )
 
-    private val debugActionPrefixes = listOf(
-        "am start ",
-        "am start-activity ",
-        "am broadcast ",
-        "cmd notification post ",
-    )
-
     private val mutatingTokens = listOf(
         " rm ", "mv ", "cp ", "chmod ", "chown ", "touch ", "mkdir ", "rmdir ",
         "pm clear ", "pm install", "pm uninstall", "pm disable", "pm enable", "pm grant ", "pm revoke ",
@@ -57,6 +50,8 @@ object BridgePolicy {
         BridgeCommandType.APP_LOGCAT,
         BridgeCommandType.DUMPSYS -> BridgeRisk.READ_ONLY
 
+        // The structured LAUNCH type is the only trusted-session stateful/debug action. APKbox
+        // builds that command itself from a validated package name.
         BridgeCommandType.LAUNCH -> BridgeRisk.DEBUG_ACTION
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
@@ -103,7 +98,10 @@ object BridgePolicy {
         if (normalized in readOnlyExact || readOnlyPrefixes.any { normalized.startsWith(it) }) {
             return BridgeRisk.READ_ONLY
         }
-        if (debugActionPrefixes.any { normalized.startsWith(it) }) return BridgeRisk.DEBUG_ACTION
+
+        // Raw shell commands that do anything beyond the strict read-only allowlist always require
+        // a fresh approval, even during a trusted session. Use structured LAUNCH/LOGCAT/DUMPSYS for
+        // safe autonomous debugging operations.
         return BridgeRisk.DANGEROUS
     }
 }
