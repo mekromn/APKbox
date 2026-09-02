@@ -75,6 +75,12 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 
+    // Local Wireless Debugging / ADB client. The upstream project is dual licensed;
+    // APKbox consumes it under Apache-2.0. Conscrypt keeps TLSv1.3 pairing/connection
+    // independent of hidden Android crypto APIs.
+    implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
+    implementation("org.conscrypt:conscrypt-android:2.5.3")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }
