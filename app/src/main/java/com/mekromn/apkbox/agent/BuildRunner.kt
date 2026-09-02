@@ -26,8 +26,29 @@ class BuildRunner(
 
     suspend fun run(candidate: BuildCandidate): BuildRunCheckpoint = mutex.withLock {
         store.saveCandidate(candidate)
-        val started = store.loadCheckpoint(candidate.runId)?.startedAtEpochMs?.takeIf { it > 0L }
-            ?: System.currentTimeMillis()
+        val prior = store.loadCheckpoint(candidate.runId)
+        if (prior != null && prior.buildId == candidate.buildId && prior.apkSha256.equals(candidate.expectedApkSha256, true)) {
+            when (prior.state) {
+                BuildRunState.PASSED,
+                BuildRunState.TESTING -> return@withLock prior
+                BuildRunState.INSTALLING,
+                BuildRunState.LAUNCHING -> {
+                    val installedSha = installedPackageSha256(candidate.targetPackage)
+                    if (installedSha.equals(candidate.expectedApkSha256, ignoreCase = true)) {
+                        var resumed = prior.copy(
+                            state = BuildRunState.LAUNCHING,
+                            detail = "Recovered after process interruption: installed base.apk matches the exact candidate SHA.",
+                            updatedAtEpochMs = System.currentTimeMillis(),
+                        )
+                        store.saveCheckpoint(resumed)
+                        return@withLock finishAfterInstalled(candidate, resumed)
+                    }
+                }
+                else -> Unit
+            }
+        }
+
+        val started = prior?.startedAtEpochMs?.takeIf { it > 0L } ?: System.currentTimeMillis()
         var checkpoint = BuildRunCheckpoint(
             buildId = candidate.buildId,
             runId = candidate.runId,
@@ -102,11 +123,7 @@ class BuildRunner(
 
         val projectResolution = resolveProject(candidate, archive.label)
         if (projectResolution.ambiguous) {
-            return@withLock fail(
-                checkpoint,
-                BuildRunState.BLOCKED_PROJECT_AMBIGUOUS,
-                projectResolution.detail,
-            )
+            return@withLock fail(checkpoint, BuildRunState.BLOCKED_PROJECT_AMBIGUOUS, projectResolution.detail)
         }
 
         checkpoint = transition(
@@ -147,7 +164,19 @@ class BuildRunner(
             return@withLock pass(checkpoint, "Verified build archived; autoInstall=false so device state was not changed.")
         }
 
+        val alreadyInstalledSha = installedPackageSha256(candidate.targetPackage)
+        if (alreadyInstalledSha.equals(actualSha, ignoreCase = true)) {
+            checkpoint = transition(
+                checkpoint,
+                BuildRunState.LAUNCHING,
+                "Exact candidate is already installed; skipping duplicate package-manager mutation.",
+            )
+            return@withLock finishAfterInstalled(candidate, checkpoint)
+        }
+
         checkpoint = transition(checkpoint, BuildRunState.INSTALLING, "Installing archived candidate unattended through paired Wireless ADB.")
+        lastPersistBytes = -1L
+        lastPersistAt = 0L
         val install = runCatching {
             adb.installApk(apkFile, allowDowngrade = candidate.allowDowngrade) { sent, total ->
                 val now = System.currentTimeMillis()
@@ -174,32 +203,17 @@ class BuildRunner(
             )
         }
 
-        if (candidate.autoLaunch) {
-            checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Launching newly installed ${candidate.targetPackage}.")
-            val launch = runCatching {
-                adb.execute("monkey -p ${candidate.targetPackage} -c android.intent.category.LAUNCHER 1", 15)
-            }.getOrElse { failure ->
-                return@withLock fail(checkpoint, BuildRunState.FAILED, "Installed build could not be launched: ${message(failure)}")
-            }
-            if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
-                return@withLock fail(
-                    checkpoint,
-                    BuildRunState.FAILED,
-                    "Installed build launch failed: ${launch.output.take(2_000)}",
-                )
-            }
-        }
-
-        if (candidate.planRunId.isNotBlank()) {
-            checkpoint = transition(
+        val installedSha = installedPackageSha256(candidate.targetPackage)
+        if (!installedSha.equals(actualSha, ignoreCase = true)) {
+            return@withLock fail(
                 checkpoint,
-                BuildRunState.TESTING,
-                "Installed and launched successfully; awaiting autonomous test plan ${candidate.planRunId}.",
+                BuildRunState.FAILED,
+                "Package manager reported success, but installed base.apk SHA '$installedSha' does not match verified candidate $actualSha.",
             )
-            return@withLock checkpoint
         }
 
-        pass(checkpoint, "Verified, archived, unattended-installed${if (candidate.autoLaunch) ", and launched" else ""} successfully.")
+        checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Exact installed base.apk SHA verified after unattended install.")
+        finishAfterInstalled(candidate, checkpoint)
     }
 
     fun checkpoint(runId: String): BuildRunCheckpoint? = store.loadCheckpoint(runId)
@@ -215,6 +229,45 @@ class BuildRunner(
         )
         store.saveCheckpoint(updated)
         return updated
+    }
+
+    private suspend fun finishAfterInstalled(
+        candidate: BuildCandidate,
+        initial: BuildRunCheckpoint,
+    ): BuildRunCheckpoint {
+        var checkpoint = initial
+        if (candidate.autoLaunch) {
+            checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Launching newly installed ${candidate.targetPackage}.")
+            val launch = runCatching {
+                adb.execute("monkey -p ${candidate.targetPackage} -c android.intent.category.LAUNCHER 1", 15)
+            }.getOrElse { failure ->
+                return fail(checkpoint, BuildRunState.FAILED, "Installed build could not be launched: ${message(failure)}")
+            }
+            if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
+                return fail(checkpoint, BuildRunState.FAILED, "Installed build launch failed: ${launch.output.take(2_000)}")
+            }
+        }
+
+        if (candidate.planRunId.isNotBlank()) {
+            return transition(
+                checkpoint,
+                BuildRunState.TESTING,
+                "Installed and launched successfully; awaiting autonomous test plan ${candidate.planRunId}.",
+            )
+        }
+        return pass(checkpoint, "Verified, archived, unattended-installed${if (candidate.autoLaunch) ", and launched" else ""} successfully.")
+    }
+
+    private suspend fun installedPackageSha256(packageName: String): String {
+        val pathResult = runCatching { adb.execute("pm path $packageName", 10) }.getOrNull() ?: return ""
+        val path = pathResult.output.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("package:") && it.endsWith("/base.apk") }
+            ?.removePrefix("package:")
+            ?: return ""
+        if (!path.matches(Regex("[/A-Za-z0-9._=:+-]+"))) return ""
+        val hashResult = runCatching { adb.execute("sha256sum $path", 20) }.getOrNull() ?: return ""
+        return Regex("(?i)^[0-9a-f]{64}").find(hashResult.output.trim())?.value?.lowercase().orEmpty()
     }
 
     private suspend fun archiveCandidate(
@@ -249,11 +302,7 @@ class BuildRunner(
             val project = projects.firstOrNull { it.id == candidate.projectId }
                 ?: return ProjectResolution(null, true, "Requested APKbox project '${candidate.projectId}' does not exist.")
             if (project.packageName != candidate.targetPackage) {
-                return ProjectResolution(
-                    null,
-                    true,
-                    "Requested project ${project.name} stores ${project.packageName}, not ${candidate.targetPackage}.",
-                )
+                return ProjectResolution(null, true, "Requested project ${project.name} stores ${project.packageName}, not ${candidate.targetPackage}.")
             }
             return ProjectResolution(project, false, "Using explicitly selected project ${project.name}.")
         }
