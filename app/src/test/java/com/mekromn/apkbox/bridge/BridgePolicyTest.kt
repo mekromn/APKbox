@@ -1,0 +1,135 @@
+package com.mekromn.apkbox.bridge
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class BridgePolicyTest {
+    private val now = 1_788_336_000_000L
+    private val trustedUntil = now + 10 * 60_000L
+
+    @Test
+    fun structuredDiagnosticsAreReadOnly() {
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.LOGCAT)))
+        assertEquals(
+            BridgeRisk.READ_ONLY,
+            BridgePolicy.classify(request(BridgeCommandType.APP_LOGCAT, packageName = "com.example.app")),
+        )
+        assertEquals(
+            BridgeRisk.READ_ONLY,
+            BridgePolicy.classify(request(BridgeCommandType.DUMPSYS, service = "package")),
+        )
+    }
+
+    @Test
+    fun obviousReadOnlyShellMayUseTrustedSession() {
+        val request = request(BridgeCommandType.SHELL, command = "getprop ro.product.model")
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request))
+        assertTrue(
+            BridgePolicy.mayAutoExecute(
+                request,
+                trustedUntil,
+                allowInformational = false,
+                allowPopups = false,
+                now = now,
+            )
+        )
+    }
+
+    @Test
+    fun mutationNeverAutoExecutesEvenInsideTrustedSession() {
+        val dangerous = listOf(
+            "pm clear com.example.app",
+            "settings put global airplane_mode_on 1",
+            "rm -rf /data/local/tmp/test",
+            "am force-stop com.example.app",
+            "reboot",
+        )
+        dangerous.forEach { command ->
+            val request = request(BridgeCommandType.SHELL, command = command)
+            assertEquals("$command must be mutating", BridgeRisk.MUTATING, BridgePolicy.classify(request))
+            assertFalse(
+                "$command must never auto execute",
+                BridgePolicy.mayAutoExecute(
+                    request,
+                    trustedUntil,
+                    allowInformational = true,
+                    allowPopups = true,
+                    now = now,
+                )
+            )
+            assertFalse(BridgePolicy.trustedSessionEligible(request))
+        }
+    }
+
+    @Test
+    fun shellCompositionAndUnknownCommandsRequireFreshApproval() {
+        val commands = listOf(
+            "getprop ro.product.model; reboot",
+            "logcat -d | grep AndroidRuntime",
+            "echo test",
+            "sh -c id",
+        )
+        commands.forEach { command ->
+            val request = request(BridgeCommandType.SHELL, command = command)
+            assertEquals("$command must remain dangerous", BridgeRisk.DANGEROUS, BridgePolicy.classify(request))
+            assertFalse(
+                BridgePolicy.mayAutoExecute(
+                    request,
+                    trustedUntil,
+                    allowInformational = true,
+                    allowPopups = true,
+                    now = now,
+                )
+            )
+        }
+    }
+
+    @Test
+    fun trustedSessionExpiresImmediatelyAtBoundary() {
+        val request = request(BridgeCommandType.LOGCAT)
+        assertTrue(
+            BridgePolicy.mayAutoExecute(request, now + 1, false, false, now)
+        )
+        assertFalse(
+            BridgePolicy.mayAutoExecute(request, now, false, false, now)
+        )
+    }
+
+    @Test
+    fun informationalMessagesRespectIndependentPopupToggle() {
+        val notification = request(BridgeCommandType.NOTIFICATION, message = "test")
+        val popup = request(BridgeCommandType.POPUP, message = "test")
+
+        assertFalse(BridgePolicy.mayAutoExecute(notification, 0L, false, false, now))
+        assertTrue(BridgePolicy.mayAutoExecute(notification, 0L, true, false, now))
+        assertFalse(BridgePolicy.mayAutoExecute(popup, 0L, true, false, now))
+        assertTrue(BridgePolicy.mayAutoExecute(popup, 0L, true, true, now))
+    }
+
+    @Test
+    fun launchIsDebugActionButStillNeedsTrust() {
+        val launch = request(BridgeCommandType.LAUNCH, packageName = "com.example.app")
+        assertEquals(BridgeRisk.DEBUG_ACTION, BridgePolicy.classify(launch))
+        assertFalse(BridgePolicy.mayAutoExecute(launch, 0L, true, true, now))
+        assertTrue(BridgePolicy.mayAutoExecute(launch, trustedUntil, true, true, now))
+    }
+
+    private fun request(
+        type: BridgeCommandType,
+        command: String = "",
+        packageName: String = "",
+        service: String = "",
+        message: String = "",
+    ) = BridgeRequest(
+        id = "test-request",
+        type = type,
+        command = command,
+        packageName = packageName,
+        service = service,
+        message = message,
+        createdAtEpochMs = now,
+        expiresAtEpochMs = trustedUntil,
+    )
+}
