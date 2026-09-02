@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import android.os.StatFs
+import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.AdbInstallResult
 import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
@@ -33,6 +35,8 @@ class ApkInstaller(
         private const val SAFETY_RESERVE_BYTES = 256L * 1024L * 1024L
         private const val MIB = 1024L * 1024L
         private const val INSTALL_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
+        private val PACKAGE_NAME_REGEX = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
+        private val PACKAGE_PATH_REGEX = Regex("[/A-Za-z0-9._=:+-]+")
     }
 
     private val appContext = context.applicationContext
@@ -74,28 +78,16 @@ class ApkInstaller(
         preparedSource: File? = null,
         onProgress: ((InstallProgress) -> Unit)? = null,
     ) = withContext(Dispatchers.IO) {
-        // Reclaim old full-size scratch APKs before asking Android for another large staging area.
         TempStorageManager.cleanupRoutine(appContext)
-
-        // Do not allow multiple full APK staging copies to accumulate in PackageInstaller.
         cleanupStaleSessions()
         val existingSessions = runCatching { installer.mySessions }.getOrDefault(emptyList())
         check(existingSessions.isEmpty()) {
             "Another APKbox install is already staged. Finish or cancel that install first, or use ‘Free temporary install space’. APKbox will not stage multiple full APK copies at once."
         }
 
-        // Read the compact binary manifest once. It is the authority for install size and ordering.
         val plan = fastStager.plan(record)
         val exactSize = plan.exactSize
-
-        // Android can briefly need both a full staging copy and the destination package copy.
-        // Keep an additional reserve so APKbox refuses early instead of filling /data mid-install.
-        val availableBytes = runCatching { StatFs(appContext.filesDir.absolutePath).availableBytes }
-            .getOrDefault(Long.MAX_VALUE)
-        val requiredBytes = exactSize * 2L + SAFETY_RESERVE_BYTES
-        check(availableBytes >= requiredBytes) {
-            "Not enough free space to safely stage ${record.displayName}. APKbox needs about ${toMiB(requiredBytes)} MiB free for this ${toMiB(exactSize)} MiB APK, but only ${toMiB(availableBytes)} MiB is available. Free space first; nothing was staged."
-        }
+        requireFreeInstallSpace(record, exactSize)
 
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(record.packageName)
@@ -113,41 +105,9 @@ class ApkInstaller(
         try {
             session = installer.openSession(sessionId)
             session.openWrite("base.apk", 0, exactSize).use { rawOutput ->
-                // PackageInstaller's session stream is a binder/file-bridge boundary. Coalescing the
-                // many ordered chunk writes into 4 MiB blocks materially reduces call/syscall
-                // overhead. This changes only write granularity, never byte content or order.
                 val output = BufferedOutputStream(rawOutput, INSTALL_WRITE_BUFFER_BYTES)
-                val progressBridge: (FastApkStager.Progress) -> Unit = { progress ->
-                    onProgress?.invoke(
-                        InstallProgress(
-                            bytesWritten = progress.bytesWritten,
-                            totalBytes = progress.totalBytes,
-                            directPreparedSource = progress.source == FastApkStager.Source.PREPARED_FILE,
-                        )
-                    )
-                }
-
-                if (preparedSource?.isFile == true) {
-                    fastStager.stagePreparedFile(
-                        record = record,
-                        plan = plan,
-                        sourceFile = preparedSource,
-                        output = output,
-                        onProgress = progressBridge,
-                    )
-                } else {
-                    fastStager.stageVault(
-                        record = record,
-                        plan = plan,
-                        output = output,
-                        onProgress = progressBridge,
-                    )
-                }
-
-                // FastApkStager flushes, but flush explicitly here as the handoff barrier before
-                // fsync. Do not close the wrapper: rawOutput is owned by the use block below.
+                stageExact(record, plan, preparedSource, output, onProgress)
                 output.flush()
-                // Durability semantics are unchanged: PackageInstaller is fsynced before commit.
                 session.fsync(rawOutput)
             }
 
@@ -164,12 +124,121 @@ class ApkInstaller(
             )
             session.commit(callback.intentSender)
         } catch (t: Throwable) {
-            // Covers failures both before and after openSession; no orphan staging allocation remains.
             runCatching { installer.abandonSession(sessionId) }
             throw t
         } finally {
             runCatching { session?.close() }
         }
+    }
+
+    /**
+     * User-selected silent install through APKbox's paired/self-healing Wireless ADB connection.
+     * The APK is never materialized as an APKbox cache file. Instead FastApkStager reconstructs or
+     * reads the prepared source straight into an ADB install session. Android is not allowed to
+     * commit the session until FastApkStager has verified the complete outgoing SHA-256.
+     */
+    suspend fun installUnattended(
+        record: ApkRecord,
+        adb: AdbBridgeManager,
+        preparedSource: File? = null,
+        allowDowngrade: Boolean = false,
+        onProgress: ((InstallProgress) -> Unit)? = null,
+    ): AdbInstallResult = withContext(Dispatchers.IO) {
+        require(PACKAGE_NAME_REGEX.matches(record.packageName)) { "Stored APK has an invalid package name." }
+        TempStorageManager.cleanupRoutine(appContext)
+        cleanupStaleSessions()
+        val existingSessions = runCatching { installer.mySessions }.getOrDefault(emptyList())
+        check(existingSessions.isEmpty()) {
+            "A normal APKbox install is still staged. Finish or cancel it before starting an unattended install."
+        }
+
+        val plan = fastStager.plan(record)
+        val exactSize = plan.exactSize
+        requireFreeInstallSpace(record, exactSize)
+
+        val result = adb.installVerifiedStream(
+            totalBytes = exactSize,
+            allowDowngrade = allowDowngrade,
+        ) { rawOutput ->
+            val output = BufferedOutputStream(rawOutput, INSTALL_WRITE_BUFFER_BYTES)
+            stageExact(record, plan, preparedSource, output, onProgress)
+            output.flush()
+        }
+
+        check(result.success) {
+            "Android package manager rejected unattended install: ${result.output.take(2_000)}"
+        }
+
+        val installedSha = installedBaseApkSha256(adb, record.packageName)
+        check(installedSha.equals(record.sha256, ignoreCase = true)) {
+            "Unattended install reported success, but installed base.apk SHA-256 '$installedSha' does not match ${record.sha256}."
+        }
+        result
+    }
+
+    private suspend fun stageExact(
+        record: ApkRecord,
+        plan: FastApkStager.Plan,
+        preparedSource: File?,
+        output: BufferedOutputStream,
+        onProgress: ((InstallProgress) -> Unit)?,
+    ) {
+        val progressBridge: (FastApkStager.Progress) -> Unit = { progress ->
+            onProgress?.invoke(
+                InstallProgress(
+                    bytesWritten = progress.bytesWritten,
+                    totalBytes = progress.totalBytes,
+                    directPreparedSource = progress.source == FastApkStager.Source.PREPARED_FILE,
+                )
+            )
+        }
+
+        if (preparedSource?.isFile == true) {
+            fastStager.stagePreparedFile(
+                record = record,
+                plan = plan,
+                sourceFile = preparedSource,
+                output = output,
+                onProgress = progressBridge,
+            )
+        } else {
+            fastStager.stageVault(
+                record = record,
+                plan = plan,
+                output = output,
+                onProgress = progressBridge,
+            )
+        }
+    }
+
+    private fun requireFreeInstallSpace(record: ApkRecord, exactSize: Long) {
+        val availableBytes = runCatching { StatFs(appContext.filesDir.absolutePath).availableBytes }
+            .getOrDefault(Long.MAX_VALUE)
+        val requiredBytes = exactSize * 2L + SAFETY_RESERVE_BYTES
+        check(availableBytes >= requiredBytes) {
+            "Not enough free space to safely stage ${record.displayName}. APKbox needs about ${toMiB(requiredBytes)} MiB free for this ${toMiB(exactSize)} MiB APK, but only ${toMiB(availableBytes)} MiB is available. Free space first; nothing was staged."
+        }
+    }
+
+    private suspend fun installedBaseApkSha256(adb: AdbBridgeManager, packageName: String): String {
+        val paths = adb.execute("pm path $packageName", 10)
+        check(!paths.timedOut && (paths.exitCode == null || paths.exitCode == 0)) {
+            "Could not verify the installed APK path."
+        }
+        val basePath = paths.output.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("package:") && it.endsWith("/base.apk") }
+            ?.removePrefix("package:")
+            .orEmpty()
+        check(basePath.isNotBlank() && PACKAGE_PATH_REGEX.matches(basePath)) {
+            "Android did not return a verifiable installed base.apk path."
+        }
+
+        val hash = adb.execute("sha256sum $basePath", 20)
+        check(!hash.timedOut && (hash.exitCode == null || hash.exitCode == 0)) {
+            "Could not verify installed base.apk SHA-256."
+        }
+        return Regex("(?i)^[0-9a-f]{64}").find(hash.output.trim())?.value?.lowercase().orEmpty()
     }
 
     private fun toMiB(bytes: Long): Long =
