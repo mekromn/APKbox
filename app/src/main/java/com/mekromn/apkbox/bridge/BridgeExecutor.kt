@@ -90,17 +90,6 @@ class BridgeExecutor(
         }
     }
 
-    suspend fun launchApprovalUi() {
-        if (adb.ensureConnected()) {
-            runCatching {
-                adb.execute(
-                    "am start -n ${appContext.packageName}/.bridge.BridgeApprovalActivity --activity-new-task",
-                    8,
-                )
-            }
-        }
-    }
-
     private suspend fun deliverPopup(request: BridgeRequest) {
         val popup = BridgePopupMessage(
             title = request.title.ifBlank { "ChatGPT instruction" }.take(256),
@@ -159,7 +148,7 @@ class BridgeExecutor(
     private fun buildAppLogcatCommand(packageName: String): String {
         val pkg = packageName.trim()
         require(packageRegex.matches(pkg)) { "Invalid package name." }
-        return "pid=\\$(pidof $pkg); if [ -n \"\\$pid\" ]; then logcat --pid=\\$pid -d -v threadtime -t 5000; else echo 'Package is not running: $pkg'; fi"
+        return "pid=\$(pidof $pkg); if [ -n \"\$pid\" ]; then logcat --pid=\$pid -d -v threadtime -t 5000; else echo 'Package is not running: $pkg'; fi"
     }
 
     private fun buildDumpsysCommand(service: String, extra: String): String {
