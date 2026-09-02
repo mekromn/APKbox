@@ -21,6 +21,17 @@ class AgentCheckpointStore(context: Context) {
     }.getOrNull()
 
     @Synchronized
+    fun savePlan(plan: AutonomousPlan) {
+        atomicWrite(runFile(plan.runId, "plan.json"), plan.toJson().toString())
+    }
+
+    @Synchronized
+    fun loadPlan(runId: String): AutonomousPlan? = runCatching {
+        val file = runFile(runId, "plan.json")
+        if (!file.isFile) null else AutonomousPlan.fromJson(JSONObject(file.readText(Charsets.UTF_8)))
+    }.getOrNull()
+
+    @Synchronized
     fun saveHandoff(checkpoint: ChatHandoffCheckpoint) {
         atomicWrite(runFile(checkpoint.runId, "handoff.json"), checkpoint.toJson().toString())
     }
