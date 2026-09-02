@@ -204,6 +204,17 @@ class PairingAssistantService : AccessibilityService() {
     }
 
     private fun capturePairingSecrets(text: List<String>) {
+        // The normal Wireless debugging page also contains an IP:port, but that is the TLS connect
+        // port, not the temporary pairing-server port. Do not scrape either secret until the actual
+        // pairing-code dialog is positively identified.
+        val pairingDialogVisible = text.any { line ->
+            line.contains("pairing code", ignoreCase = true) ||
+                line.contains("Wi-Fi pairing code", ignoreCase = true)
+        } && text.any { line ->
+            line.contains("IP address", ignoreCase = true) || PORT_REGEX.containsMatchIn(line)
+        }
+        if (!pairingDialogVisible) return
+
         if (pairingCode == null) {
             pairingCode = text.asSequence()
                 .mapNotNull { CODE_REGEX.find(it)?.value }
@@ -211,8 +222,8 @@ class PairingAssistantService : AccessibilityService() {
             if (pairingCode != null) startPairingDiscovery()
         }
 
-        // mDNS is authoritative for the temporary pairing port, but parsing the visible IP:port is
-        // a useful fallback on builds where local service discovery is delayed.
+        // mDNS is authoritative for the temporary pairing port, but parsing the pairing dialog's
+        // visible IP:port is a useful fallback on builds where local service discovery is delayed.
         if (pairingPort == null) {
             pairingPort = text.asSequence()
                 .mapNotNull { line -> PORT_REGEX.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() }
