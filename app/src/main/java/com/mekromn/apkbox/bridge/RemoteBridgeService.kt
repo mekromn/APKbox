@@ -334,19 +334,26 @@ class RemoteBridgeService : Service() {
     }
 
     private suspend fun maybeReconnectAdb(config: BridgeConfig) {
-        if (!config.paired || adb.status.value.connected) return
+        if (!config.paired) return
         val now = System.currentTimeMillis()
         if (now - lastAdbReconnect < ADB_RECONNECT_INTERVAL_MS) return
         lastAdbReconnect = now
-        runCatching { adb.autoConnect() }
+        // Background healing must honor the transport's backoff and USER_ACTION_REQUIRED state.
+        // Only an explicit user reconnect operation is allowed to force rediscovery.
+        runCatching { adb.autoHeal(force = false) }
     }
 
     private fun heartbeatFingerprint(config: BridgeConfig): String = buildString {
+        val adbState = adb.status.value
         append(config.enabled).append('|')
         append(config.deviceId).append('|')
         append(config.repoOwner).append('/').append(config.repoName).append('|')
         append(config.paired).append('|')
-        append(adb.status.value.connected).append('|')
+        append(adbState.connected).append('|')
+        append(adbState.healPhase.name).append('|')
+        append(adbState.consecutiveFailures).append('|')
+        append(adbState.userActionRequired).append('|')
+        append(adbState.wifiAvailable).append('|')
         append(config.trustedUntilEpochMs).append('|')
         append(config.allowInformational).append('|')
         append(config.allowPopups)
@@ -414,7 +421,16 @@ class RemoteBridgeService : Service() {
     }
 
     private fun statusLine(): String {
-        val adbText = if (adb.status.value.connected) "ADB connected" else "ADB waiting"
+        val adbState = adb.status.value
+        val adbText = when (adbState.healPhase) {
+            AdbHealPhase.HEALTHY -> "ADB healthy"
+            AdbHealPhase.VERIFYING -> "ADB verifying"
+            AdbHealPhase.REDISCOVERING -> "ADB rediscovering"
+            AdbHealPhase.WAITING_FOR_WIFI -> "ADB waiting for Wi-Fi"
+            AdbHealPhase.BACKOFF -> "ADB retry backoff"
+            AdbHealPhase.USER_ACTION_REQUIRED -> "ADB needs attention"
+            AdbHealPhase.DISCONNECTED -> "ADB disconnected"
+        }
         val runtime = BridgeRuntime.status.value
         val relayText = if (runtime.relayReachable) "Continuity online" else "Continuity retrying"
         val trust = prefs.state.value.trustedUntilEpochMs
