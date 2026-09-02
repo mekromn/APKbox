@@ -23,6 +23,7 @@ class GitHubRelayClient {
         private const val API_ROOT = "https://api.github.com"
         private const val API_VERSION = "2022-11-28"
         private const val MAX_RESPONSE_CHARS = 3_500_000
+        private const val MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
     }
 
     suspend fun test(config: BridgeConfig, token: String): String = withContext(Dispatchers.IO) {
@@ -51,7 +52,7 @@ class GitHubRelayClient {
             val path = item.optString("path")
             if (!path.endsWith(".json", ignoreCase = true)) continue
             val sha = item.optString("sha")
-            val file = getFile(config, token, path) ?: continue
+            val file = getTextFile(config, token, path) ?: continue
             runCatching { BridgeRequest.fromJson(JSONObject(file.text)) }
                 .onSuccess { request -> items += RelayInboxItem(path, sha.ifBlank { file.sha }, request) }
         }
@@ -61,6 +62,22 @@ class GitHubRelayClient {
     suspend fun writeResult(config: BridgeConfig, token: String, result: BridgeResult) = withContext(Dispatchers.IO) {
         val path = "bridge/devices/${config.deviceId}/outbox/${result.requestId}.json"
         putJson(config, token, path, result.toJson(config.deviceId), "APKbox bridge result ${result.requestId}")
+    }
+
+    suspend fun writeArtifact(
+        config: BridgeConfig,
+        token: String,
+        requestId: String,
+        extension: String,
+        bytes: ByteArray,
+    ): String = withContext(Dispatchers.IO) {
+        require(bytes.isNotEmpty()) { "Artifact is empty." }
+        require(bytes.size <= MAX_ARTIFACT_BYTES) { "Artifact exceeds the $MAX_ARTIFACT_BYTES-byte relay limit." }
+        val safeId = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val safeExtension = extension.lowercase().replace(Regex("[^a-z0-9]"), "").take(8).ifBlank { "bin" }
+        val path = "bridge/devices/${config.deviceId}/artifacts/$safeId.$safeExtension"
+        putBytes(config, token, path, bytes, "APKbox bridge artifact $safeId")
+        path
     }
 
     suspend fun writeAwaitingApproval(
@@ -85,7 +102,7 @@ class GitHubRelayClient {
         adbStatus: AdbBridgeStatus,
     ) = withContext(Dispatchers.IO) {
         val json = JSONObject()
-            .put("schema", 1)
+            .put("schema", 2)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
@@ -99,7 +116,9 @@ class GitHubRelayClient {
             .put("allowPopups", config.allowPopups)
             .put("lastSeenEpochMs", System.currentTimeMillis())
             .put("capabilities", JSONArray(listOf(
-                "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup"
+                "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
+                "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
+                "agent_checkpoint", "conversation_handoff"
             )))
         val path = "bridge/devices/${config.deviceId}/state.json"
         putJson(config, token, path, json, "APKbox bridge heartbeat")
@@ -119,7 +138,6 @@ class GitHubRelayClient {
             .put("message", "APKbox consumed bridge request $requestId")
             .put("sha", sha)
             .toString()
-        // 404 is success here: another successful retry may already have removed the inbox file.
         requestOrNull(
             token = token,
             method = "DELETE",
@@ -131,7 +149,7 @@ class GitHubRelayClient {
 
     private data class FilePayload(val sha: String, val text: String)
 
-    private fun getFile(config: BridgeConfig, token: String, path: String): FilePayload? {
+    private fun getTextFile(config: BridgeConfig, token: String, path: String): FilePayload? {
         val response = requestOrNull(
             token,
             "GET",
@@ -144,18 +162,41 @@ class GitHubRelayClient {
         return FilePayload(json.optString("sha"), decoded)
     }
 
+    private fun getFileSha(config: BridgeConfig, token: String, path: String): String? {
+        val response = requestOrNull(
+            token,
+            "GET",
+            "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
+        ) ?: return null
+        return JSONObject(response.body).optString("sha").takeIf { it.isNotBlank() }
+    }
+
     private fun putJson(
         config: BridgeConfig,
         token: String,
         path: String,
         json: JSONObject,
         commitMessage: String,
+    ) = putBytes(
+        config = config,
+        token = token,
+        path = path,
+        bytes = json.toString().toByteArray(Charsets.UTF_8),
+        commitMessage = commitMessage,
+    )
+
+    private fun putBytes(
+        config: BridgeConfig,
+        token: String,
+        path: String,
+        bytes: ByteArray,
+        commitMessage: String,
     ) {
-        val existing = getFile(config, token, path)
+        val existingSha = getFileSha(config, token, path)
         val body = JSONObject()
             .put("message", commitMessage.take(180))
-            .put("content", Base64.encodeToString(json.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
-        if (existing?.sha?.isNotBlank() == true) body.put("sha", existing.sha)
+            .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        if (!existingSha.isNullOrBlank()) body.put("sha", existingSha)
         request(
             token = token,
             method = "PUT",
