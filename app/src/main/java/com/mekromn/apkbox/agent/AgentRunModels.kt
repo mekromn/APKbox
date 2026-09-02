@@ -70,6 +70,8 @@ data class AgentCheckpoint(
     val lastResult: String = "",
     val controllerLeaseUntilEpochMs: Long = 0L,
     val retryBudgetRemaining: Int = 0,
+    val startedAtEpochMs: Long = 0L,
+    val missionDeadlineEpochMs: Long = 0L,
     val sessionSegmentIndex: Int = 0,
     val sessionSegmentName: String = "",
     val nextSessionGoal: String = "",
@@ -77,7 +79,7 @@ data class AgentCheckpoint(
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 1)
+        .put("schema", 2)
         .put("runId", runId)
         .put("targetPackage", targetPackage)
         .put("state", state.name)
@@ -93,6 +95,8 @@ data class AgentCheckpoint(
         .put("lastResult", lastResult)
         .put("controllerLeaseUntilEpochMs", controllerLeaseUntilEpochMs)
         .put("retryBudgetRemaining", retryBudgetRemaining)
+        .put("startedAtEpochMs", startedAtEpochMs)
+        .put("missionDeadlineEpochMs", missionDeadlineEpochMs)
         .put("sessionSegmentIndex", sessionSegmentIndex)
         .put("sessionSegmentName", sessionSegmentName)
         .put("nextSessionGoal", nextSessionGoal)
@@ -116,6 +120,8 @@ data class AgentCheckpoint(
             lastResult = json.optString("lastResult"),
             controllerLeaseUntilEpochMs = json.optLong("controllerLeaseUntilEpochMs"),
             retryBudgetRemaining = json.optInt("retryBudgetRemaining"),
+            startedAtEpochMs = json.optLong("startedAtEpochMs"),
+            missionDeadlineEpochMs = json.optLong("missionDeadlineEpochMs"),
             sessionSegmentIndex = json.optInt("sessionSegmentIndex"),
             sessionSegmentName = json.optString("sessionSegmentName"),
             nextSessionGoal = json.optString("nextSessionGoal"),
