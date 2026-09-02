@@ -105,15 +105,24 @@ class GitHubRelayClient {
         putJson(config, token, path, json, "APKbox bridge heartbeat")
     }
 
-    suspend fun deleteInbox(config: BridgeConfig, token: String, item: RelayInboxItem) = withContext(Dispatchers.IO) {
+    suspend fun deleteInbox(config: BridgeConfig, token: String, item: RelayInboxItem) =
+        deleteInbox(config, token, item.path, item.sha, item.request.id)
+
+    suspend fun deleteInbox(
+        config: BridgeConfig,
+        token: String,
+        path: String,
+        sha: String,
+        requestId: String,
+    ) = withContext(Dispatchers.IO) {
         val body = JSONObject()
-            .put("message", "APKbox consumed bridge request ${item.request.id}")
-            .put("sha", item.sha)
+            .put("message", "APKbox consumed bridge request $requestId")
+            .put("sha", sha)
             .toString()
         request(
             token = token,
             method = "DELETE",
-            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(item.path)}",
+            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
             body = body,
         )
     }
