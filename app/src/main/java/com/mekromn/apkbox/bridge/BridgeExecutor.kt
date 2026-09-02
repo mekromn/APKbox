@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.mekromn.apkbox.agent.AgentActionLedger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -27,6 +28,7 @@ class BridgeExecutor(
     private val appContext = context.applicationContext
     private val notificationManager = appContext.getSystemService(NotificationManager::class.java)
     private val screenAgent = ScreenAgentController(appContext, adb)
+    private val actionLedger = AgentActionLedger(appContext)
 
     init {
         createChannels()
@@ -34,6 +36,24 @@ class BridgeExecutor(
 
     suspend fun execute(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
         val started = System.currentTimeMillis()
+        if (needsActionReservation(request.type)) {
+            val reservation = actionLedger.reserve(
+                requestId = request.id,
+                runId = request.runId,
+                sequenceNumber = request.sequenceNumber,
+            )
+            if (!reservation.mayExecute) {
+                return BridgeResult(
+                    requestId = request.id,
+                    status = BridgeResultStatus.INVALID,
+                    risk = risk,
+                    detail = reservation.detail,
+                    durationMs = System.currentTimeMillis() - started,
+                    foregroundPackage = runCatching { screenAgent.foregroundPackage() }.getOrDefault(""),
+                )
+            }
+        }
+
         return runCatching {
             when (request.type) {
                 BridgeCommandType.TOAST -> {
@@ -148,6 +168,17 @@ class BridgeExecutor(
     }
 
     fun deleteLocalArtifact(path: String) = screenAgent.deleteLocalArtifact(path)
+
+    private fun needsActionReservation(type: BridgeCommandType): Boolean = when (type) {
+        BridgeCommandType.LAUNCH,
+        BridgeCommandType.UI_TAP,
+        BridgeCommandType.UI_FIND_TAP,
+        BridgeCommandType.UI_SWIPE,
+        BridgeCommandType.UI_TEXT,
+        BridgeCommandType.UI_KEY,
+        BridgeCommandType.UI_WAIT -> true
+        else -> false
+    }
 
     private fun fromScreenResult(
         request: BridgeRequest,
