@@ -11,6 +11,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // LibADB Android is published through JitPack. APKbox consumes it under Apache-2.0.
+        maven(url = "https://jitpack.io")
     }
 }
 
