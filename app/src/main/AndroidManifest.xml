@@ -82,7 +82,6 @@
             android:exported="false"
             android:screenOrientation="unspecified" />
 
-        <!-- Remote bridge UI is app-internal. Only APKbox itself can invoke approval/message screens. -->
         <activity
             android:name=".bridge.BridgeActivity"
             android:exported="false"
@@ -92,9 +91,16 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:screenOrientation="unspecified" />
+
+        <!--
+          Display-only and intentionally exported so the paired ADB shell can surface an
+          informational ChatGPT popup despite Android background-activity restrictions. It cannot
+          execute commands or alter bridge approval state; it only renders message data already
+          stored inside APKbox's private app storage.
+        -->
         <activity
             android:name=".bridge.BridgeMessageActivity"
-            android:exported="false"
+            android:exported="true"
             android:excludeFromRecents="true"
             android:screenOrientation="unspecified" />
 
