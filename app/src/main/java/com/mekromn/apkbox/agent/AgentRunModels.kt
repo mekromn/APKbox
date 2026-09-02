@@ -40,6 +40,20 @@ enum class SessionHandoffMode {
     AFTER_CHECKPOINT,
 }
 
+enum class AutonomousAction {
+    LAUNCH,
+    TAP,
+    FIND_TAP,
+    SWIPE,
+    TEXT,
+    KEY,
+    WAIT,
+    SNAPSHOT,
+    SCREENSHOT,
+    SLEEP,
+    CHECKPOINT,
+}
+
 data class AgentCheckpoint(
     val runId: String,
     val targetPackage: String,
@@ -190,6 +204,17 @@ data class SessionSegment(
         .put("goal", goal)
         .put("checkpointName", checkpointName)
         .put("handoffMode", handoffMode.name)
+
+    companion object {
+        fun fromJson(json: JSONObject): SessionSegment = SessionSegment(
+            index = json.optInt("index").coerceAtLeast(0),
+            name = json.optString("name").take(160),
+            goal = json.optString("goal").take(2_048),
+            checkpointName = json.optString("checkpointName").take(160),
+            handoffMode = runCatching { SessionHandoffMode.valueOf(json.optString("handoffMode", "NONE").uppercase()) }
+                .getOrDefault(SessionHandoffMode.NONE),
+        )
+    }
 }
 
 data class AutonomousPlan(
@@ -200,16 +225,57 @@ data class AutonomousPlan(
     val maxRetriesPerStep: Int,
     val steps: List<AutonomousStep>,
     val sessionSegments: List<SessionSegment> = emptyList(),
+    val controllerlessUntilCheckpoint: Boolean = true,
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 1)
+        .put("schema", 2)
         .put("runId", runId)
         .put("targetPackage", targetPackage)
         .put("checkpointName", checkpointName)
         .put("maxRuntimeSeconds", maxRuntimeSeconds)
         .put("maxRetriesPerStep", maxRetriesPerStep)
+        .put("controllerlessUntilCheckpoint", controllerlessUntilCheckpoint)
         .put("steps", JSONArray().apply { steps.forEach { put(it.toJson()) } })
         .put("sessionSegments", JSONArray().apply { sessionSegments.forEach { put(it.toJson()) } })
+
+    companion object {
+        private val runRegex = Regex("[A-Za-z0-9._-]{1,96}")
+        private val packageRegex = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
+
+        fun fromJson(json: JSONObject): AutonomousPlan {
+            val runId = json.optString("runId").trim()
+            require(runRegex.matches(runId)) { "Invalid autonomous run ID." }
+            val targetPackage = json.optString("targetPackage").trim()
+            require(packageRegex.matches(targetPackage)) { "Invalid autonomous target package." }
+
+            val stepArray = json.optJSONArray("steps") ?: JSONArray()
+            require(stepArray.length() in 1..500) { "Autonomous plan must contain 1..500 steps." }
+            val steps = buildList {
+                for (index in 0 until stepArray.length()) {
+                    add(AutonomousStep.fromJson(stepArray.getJSONObject(index), index))
+                }
+            }
+
+            val segmentArray = json.optJSONArray("sessionSegments") ?: JSONArray()
+            require(segmentArray.length() <= 50) { "Too many session segments." }
+            val segments = buildList {
+                for (index in 0 until segmentArray.length()) {
+                    add(SessionSegment.fromJson(segmentArray.getJSONObject(index)))
+                }
+            }
+
+            return AutonomousPlan(
+                runId = runId,
+                targetPackage = targetPackage,
+                checkpointName = json.optString("checkpointName", "checkpoint").take(160),
+                maxRuntimeSeconds = json.optInt("maxRuntimeSeconds", 600).coerceIn(10, 7_200),
+                maxRetriesPerStep = json.optInt("maxRetriesPerStep", 2).coerceIn(0, 10),
+                steps = steps,
+                sessionSegments = segments,
+                controllerlessUntilCheckpoint = json.optBoolean("controllerlessUntilCheckpoint", true),
+            )
+        }
+    }
 }
 
 data class AutonomousStep(
@@ -217,14 +283,71 @@ data class AutonomousStep(
     val action: String,
     val selector: String = "",
     val value: String = "",
+    val x: Int = -1,
+    val y: Int = -1,
+    val endX: Int = -1,
+    val endY: Int = -1,
+    val durationMs: Int = 300,
+    val keyCode: Int = -1,
     val timeoutSeconds: Int = 20,
     val requireUiChange: Boolean = false,
 ) {
+    val actionType: AutonomousAction
+        get() = AutonomousAction.valueOf(action.uppercase())
+
     fun toJson(): JSONObject = JSONObject()
         .put("name", name)
-        .put("action", action)
+        .put("action", actionType.name)
         .put("selector", selector)
         .put("value", value)
+        .put("x", x)
+        .put("y", y)
+        .put("endX", endX)
+        .put("endY", endY)
+        .put("durationMs", durationMs)
+        .put("keyCode", keyCode)
         .put("timeoutSeconds", timeoutSeconds)
         .put("requireUiChange", requireUiChange)
+
+    companion object {
+        fun fromJson(json: JSONObject, index: Int): AutonomousStep {
+            val action = runCatching { AutonomousAction.valueOf(json.getString("action").uppercase()) }
+                .getOrElse { error("Unsupported autonomous action at step $index.") }
+            val step = AutonomousStep(
+                name = json.optString("name", "Step ${index + 1}").take(160),
+                action = action.name,
+                selector = json.optString("selector").take(2_048),
+                value = json.optString("value").take(8_192),
+                x = json.optInt("x", -1),
+                y = json.optInt("y", -1),
+                endX = json.optInt("endX", -1),
+                endY = json.optInt("endY", -1),
+                durationMs = json.optInt("durationMs", 300).coerceIn(1, 10_000),
+                keyCode = json.optInt("keyCode", -1),
+                timeoutSeconds = json.optInt("timeoutSeconds", 20).coerceIn(1, 120),
+                requireUiChange = json.optBoolean("requireUiChange", false),
+            )
+            step.validate(index)
+            return step
+        }
+    }
+
+    private fun validate(index: Int) {
+        fun coordinate(value: Int): Boolean = value in 0..20_000
+        when (actionType) {
+            AutonomousAction.TAP -> require(coordinate(x) && coordinate(y)) { "Invalid TAP coordinates at step $index." }
+            AutonomousAction.FIND_TAP,
+            AutonomousAction.WAIT -> require(selector.isNotBlank()) { "Selector required at step $index." }
+            AutonomousAction.SWIPE -> require(
+                coordinate(x) && coordinate(y) && coordinate(endX) && coordinate(endY)
+            ) { "Invalid SWIPE coordinates at step $index." }
+            AutonomousAction.TEXT -> require(value.length <= 2_000) { "TEXT is too long at step $index." }
+            AutonomousAction.KEY -> require(keyCode in 0..400) { "Invalid KEY code at step $index." }
+            AutonomousAction.SLEEP -> require(durationMs in 1..10_000) { "Invalid SLEEP duration at step $index." }
+            AutonomousAction.LAUNCH,
+            AutonomousAction.SNAPSHOT,
+            AutonomousAction.SCREENSHOT,
+            AutonomousAction.CHECKPOINT -> Unit
+        }
+    }
 }
