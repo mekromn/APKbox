@@ -42,8 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.mekromn.apkbox.data.ApkInspector
+import com.mekromn.apkbox.install.ApkInstaller
 import com.mekromn.apkbox.install.InstallProgress
-import com.mekromn.apkbox.install.UnattendedApkInstaller
 import com.mekromn.apkbox.model.ApkRecord
 import com.mekromn.apkbox.ui.theme.APKboxTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,7 +69,7 @@ class UnattendedInstallActivity : ComponentActivity() {
 
     private val libraryStore by lazy { ApkBoxServices.libraryStore(applicationContext) }
     private val adb by lazy { ApkBoxServices.adbBridge(applicationContext) }
-    private val installer by lazy { UnattendedApkInstaller(applicationContext, adb) }
+    private val installer by lazy { ApkInstaller(applicationContext, libraryStore) }
     private val state = MutableStateFlow(UnattendedInstallUiState())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,7 +106,7 @@ class UnattendedInstallActivity : ComponentActivity() {
             state.value = UnattendedInstallUiState(
                 record = record,
                 phase = "Verifying unattended install",
-                detail = "Checking the installed package and Wireless ADB connection…",
+                detail = "Checking the installed package and self-healing Wireless ADB connection…",
                 busy = true,
             )
 
@@ -127,21 +127,22 @@ class UnattendedInstallActivity : ComponentActivity() {
 
                 val allowDowngrade = installed?.versionCode?.let { it > record.versionCode } == true
                 state.value = state.value.copy(
-                    phase = "Preparing exact APK",
+                    phase = "Opening verified install session",
                     detail = if (allowDowngrade) {
-                        "Older revision detected. APKbox will ask Android's ADB package manager for an in-place downgrade; no automatic uninstall will be attempted."
+                        "Older revision detected. APKbox will request an in-place ADB downgrade. The install session will not commit until the complete outgoing APK SHA-256 is verified; no automatic uninstall is allowed."
                     } else {
-                        "Reconstructing and verifying the archived APK before Android receives it."
+                        "APKbox will stream the exact archived bytes into an uncommitted Android install session. Android is not allowed to commit until the full outgoing APK SHA-256 is verified."
                     },
                 )
 
-                val result = installer.install(
+                val result = installer.installUnattended(
                     record = record,
+                    adb = adb,
                     allowDowngrade = allowDowngrade,
                     onProgress = { progress ->
                         state.value = state.value.copy(
                             phase = "Installing unattended",
-                            detail = "Streaming the verified APK through the self-healing Wireless ADB connection…",
+                            detail = "Streaming exact APK bytes through the self-healing Wireless ADB connection. Commit remains blocked until full SHA-256 verification succeeds…",
                             progress = progress,
                         )
                     },
@@ -149,7 +150,7 @@ class UnattendedInstallActivity : ComponentActivity() {
 
                 state.value = state.value.copy(
                     phase = "Installed & verified",
-                    detail = "Android package manager reported success and the installed base.apk SHA-256 matches the APKbox archive. ${result.durationMs} ms ADB install time.",
+                    detail = "The outgoing APK passed full SHA-256 verification before commit, Android package manager reported success, and the installed base.apk SHA-256 matches the APKbox archive. ${result.durationMs} ms ADB install time.",
                     progress = InstallProgress(record.sizeBytes, record.sizeBytes, directPreparedSource = false),
                     busy = false,
                     success = true,
