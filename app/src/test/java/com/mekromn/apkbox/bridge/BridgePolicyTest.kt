@@ -20,6 +20,8 @@ class BridgePolicyTest {
             BridgeRisk.READ_ONLY,
             BridgePolicy.classify(request(BridgeCommandType.DUMPSYS, service = "package")),
         )
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.UI_SNAPSHOT)))
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.SCREENSHOT)))
     }
 
     @Test
@@ -91,12 +93,8 @@ class BridgePolicyTest {
     @Test
     fun trustedSessionExpiresImmediatelyAtBoundary() {
         val request = request(BridgeCommandType.LOGCAT)
-        assertTrue(
-            BridgePolicy.mayAutoExecute(request, now + 1, false, false, now)
-        )
-        assertFalse(
-            BridgePolicy.mayAutoExecute(request, now, false, false, now)
-        )
+        assertTrue(BridgePolicy.mayAutoExecute(request, now + 1, false, false, now))
+        assertFalse(BridgePolicy.mayAutoExecute(request, now, false, false, now))
     }
 
     @Test
@@ -118,12 +116,37 @@ class BridgePolicyTest {
         assertTrue(BridgePolicy.mayAutoExecute(launch, trustedUntil, true, true, now))
     }
 
+    @Test
+    fun trustedUiAutomationRequiresPackageRunAndSequenceScope() {
+        val unscoped = request(BridgeCommandType.UI_FIND_TAP, packageName = "com.example.app")
+        assertEquals(BridgeRisk.DEBUG_ACTION, BridgePolicy.classify(unscoped))
+        assertFalse(BridgePolicy.mayAutoExecute(unscoped, trustedUntil, true, true, now))
+        assertFalse(BridgePolicy.trustedSessionEligible(unscoped))
+
+        val scoped = request(
+            BridgeCommandType.UI_FIND_TAP,
+            packageName = "com.example.app",
+            runId = "camera-regression-42",
+            sequenceNumber = 7,
+        )
+        assertTrue(BridgePolicy.mayAutoExecute(scoped, trustedUntil, true, true, now))
+        assertTrue(BridgePolicy.trustedSessionEligible(scoped))
+
+        val badPackage = scoped.copy(packageName = "not-a-package")
+        assertFalse(BridgePolicy.mayAutoExecute(badPackage, trustedUntil, true, true, now))
+
+        val staleSequenceShape = scoped.copy(sequenceNumber = 0)
+        assertFalse(BridgePolicy.mayAutoExecute(staleSequenceShape, trustedUntil, true, true, now))
+    }
+
     private fun request(
         type: BridgeCommandType,
         command: String = "",
         packageName: String = "",
         service: String = "",
         message: String = "",
+        runId: String = "",
+        sequenceNumber: Long = 0L,
     ) = BridgeRequest(
         id = "test-request",
         type = type,
@@ -131,6 +154,8 @@ class BridgePolicyTest {
         packageName = packageName,
         service = service,
         message = message,
+        runId = runId,
+        sequenceNumber = sequenceNumber,
         createdAtEpochMs = now,
         expiresAtEpochMs = trustedUntil,
     )
