@@ -1,6 +1,7 @@
 package com.mekromn.apkbox
 
 import android.app.Application
+import com.mekromn.apkbox.bridge.RemoteBridgeService
 import com.mekromn.apkbox.data.TempStorageManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +19,8 @@ class ApkBoxApplication : Application() {
         // scan outcomes from any trigger are then surfaced as debounced user-visible toasts.
         AutoScanToastObserver.start(this)
 
-        // Cleanup and Auto Scanner catch-up are important, but neither may hold the first frame.
+        // Cleanup, Auto Scanner catch-up, and bridge resume are important, but none may hold the
+        // first frame. The bridge only resumes if the user explicitly left it enabled.
         startupScope.launch {
             runCatching { TempStorageManager.cleanupStartup(this@ApkBoxApplication) }
             delay(900L)
@@ -26,6 +28,13 @@ class ApkBoxApplication : Application() {
                 val scanner = ApkBoxServices.autoScanner(this@ApkBoxApplication)
                 scanner.reloadFromDisk()
                 scanner.scanNow("APKbox process startup")
+            }
+            delay(500L)
+            runCatching {
+                val bridgePrefs = ApkBoxServices.bridgePreferences(this@ApkBoxApplication)
+                if (bridgePrefs.state.value.enabled && bridgePrefs.state.value.hasRelayToken) {
+                    RemoteBridgeService.start(this@ApkBoxApplication)
+                }
             }
         }
     }
