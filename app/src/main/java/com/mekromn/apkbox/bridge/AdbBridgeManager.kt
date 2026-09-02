@@ -16,6 +16,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.security.PrivateKey
 import java.security.cert.Certificate
 import java.util.concurrent.TimeUnit
@@ -36,6 +38,14 @@ data class AdbBridgeStatus(
     val lastError: String = "",
 )
 
+data class AdbInstallResult(
+    val success: Boolean,
+    val output: String,
+    val durationMs: Long,
+    val bytesSent: Long,
+    val timedOut: Boolean = false,
+)
+
 class AdbBridgeManager(context: Context) {
     companion object {
         private const val MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -43,6 +53,7 @@ class AdbBridgeManager(context: Context) {
         private const val EXIT_MARKER = "__APKBOX_EXIT__="
         private const val HEALTH_MARKER = "__APKBOX_ADB_HEALTHY__"
         private const val HEALTH_PROBE_INTERVAL_MS = 30_000L
+        private const val INSTALL_TIMEOUT_MS = 5L * 60L * 1_000L
     }
 
     private val appContext = context.applicationContext
@@ -50,6 +61,7 @@ class AdbBridgeManager(context: Context) {
     private val identity = AdbIdentityStore(appContext).loadOrCreate()
     private val connection = ApkBoxAdbConnectionManager(identity)
     private val healMutex = Mutex()
+    private val installMutex = Mutex()
     private val _status = MutableStateFlow(AdbBridgeStatus())
     val status: StateFlow<AdbBridgeStatus> = _status.asStateFlow()
 
@@ -87,9 +99,8 @@ class AdbBridgeManager(context: Context) {
     }
 
     /**
-     * Compatibility entry point used by existing bridge UI/service. It now goes through the same
-     * self-healing state machine as background recovery rather than starting a separate connection
-     * path.
+     * Explicit/manual reconnect entry point. Background callers should use autoHeal(force = false)
+     * so authorization failures and bounded backoff are respected.
      */
     suspend fun autoConnect(timeoutMs: Long = 7_000L): Boolean =
         autoHeal(force = true, timeoutMs = timeoutMs)
@@ -115,12 +126,6 @@ class AdbBridgeManager(context: Context) {
         }
     }
 
-    /**
-     * Self-healing Wireless ADB state machine. It verifies an existing idle connection, rediscoveries
-     * Android's dynamic TLS service through mDNS, optionally tries the last explicit connection port,
-     * applies bounded exponential backoff, and stops noisy retries only for a genuine authorization
-     * failure or when Wi-Fi is unavailable.
-     */
     suspend fun autoHeal(
         force: Boolean = false,
         timeoutMs: Long = 7_000L,
@@ -209,8 +214,6 @@ class AdbBridgeManager(context: Context) {
             if (discovery.getOrNull() == true) return@withLock true
 
             val discoveryFailure = discovery.exceptionOrNull()
-            // An explicit port is only a fallback. Android can rotate the Wireless Debugging port,
-            // so a stale port failing here never turns into a pairing-required conclusion by itself.
             if (lastKnownPort in 1..65535) {
                 val fallback = runCatching {
                     runCatching { connection.disconnect() }
@@ -344,6 +347,88 @@ class AdbBridgeManager(context: Context) {
         } catch (failure: Throwable) {
             noteTransportFailure(failure)
             throw failure
+        }
+    }
+
+    /**
+     * Streams an already-verified APK directly to Android's package manager over the paired ADB
+     * channel. No world-readable staging path is created. The `-S` byte count lets package manager
+     * consume exactly the file length from stdin and complete without relying on an EOF signal.
+     */
+    suspend fun installApk(
+        apkFile: File,
+        allowDowngrade: Boolean = false,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): AdbInstallResult = withContext(Dispatchers.IO) {
+        require(apkFile.isFile && apkFile.canRead()) { "Verified APK is missing or unreadable." }
+        val totalBytes = apkFile.length()
+        require(totalBytes > 0L) { "Refusing to install an empty APK." }
+        check(ensureConnected()) { healFailureMessage() }
+
+        installMutex.withLock {
+            val started = System.currentTimeMillis()
+            var bytesSent = 0L
+            val command = buildString {
+                append("pm install -r ")
+                if (allowDowngrade) append("-d ")
+                append("-S ").append(totalBytes).append(" -")
+            }
+            try {
+                val stream = connection.openStream("shell:$command")
+                try {
+                    coroutineScope {
+                        val reader = async(Dispatchers.IO) {
+                            val (bytes, _) = readBounded(stream.openInputStream(), 256 * 1024)
+                            String(bytes, Charsets.UTF_8).trim()
+                        }
+                        try {
+                            val output = withTimeout(INSTALL_TIMEOUT_MS) {
+                                val sink = stream.openOutputStream()
+                                FileInputStream(apkFile).use { source ->
+                                    val buffer = ByteArray(1024 * 1024)
+                                    while (true) {
+                                        val count = source.read(buffer)
+                                        if (count < 0) break
+                                        if (count == 0) continue
+                                        sink.write(buffer, 0, count)
+                                        bytesSent += count
+                                        onProgress(bytesSent, totalBytes)
+                                    }
+                                }
+                                check(bytesSent == totalBytes) {
+                                    "ADB install stream sent $bytesSent of $totalBytes bytes."
+                                }
+                                sink.flush()
+                                reader.await()
+                            }
+                            val success = output.lineSequence().any { it.trim().equals("Success", ignoreCase = true) }
+                            if (success) markHealthy()
+                            AdbInstallResult(
+                                success = success,
+                                output = output.ifBlank { if (success) "Success" else "Package manager returned no result." },
+                                durationMs = System.currentTimeMillis() - started,
+                                bytesSent = bytesSent,
+                            )
+                        } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                            reader.cancel()
+                            runCatching { stream.close() }
+                            AdbInstallResult(
+                                success = false,
+                                output = "Unattended ADB install timed out after ${INSTALL_TIMEOUT_MS / 1_000L} seconds.",
+                                durationMs = System.currentTimeMillis() - started,
+                                bytesSent = bytesSent,
+                                timedOut = true,
+                            )
+                        }
+                    }
+                } finally {
+                    runCatching { stream.close() }
+                    refreshStatus()
+                }
+            } catch (failure: Throwable) {
+                noteTransportFailure(failure)
+                throw failure
+            }
         }
     }
 
