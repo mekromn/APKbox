@@ -8,6 +8,7 @@ enum class OracleSignal {
     HEALTHY,
     CONTROLLER_LOST,
     DEADLINE_EXCEEDED,
+    ACTION_FAILED,
     APP_PROCESS_DIED,
     WRONG_FOREGROUND_PACKAGE,
     UI_FROZEN,
@@ -166,6 +167,14 @@ object AgentOracle {
             retry = false,
         )
     }
+
+    fun actionFailure(detail: String, mayRetry: Boolean): OracleDecision = OracleDecision(
+        signal = OracleSignal.ACTION_FAILED,
+        detail = detail,
+        terminalForStep = true,
+        captureEvidence = true,
+        mayRetry = mayRetry,
+    )
 
     private fun decision(
         signal: OracleSignal,
