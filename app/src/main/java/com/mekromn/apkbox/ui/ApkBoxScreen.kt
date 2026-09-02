@@ -100,6 +100,7 @@ fun ApkBoxScreen(
     onCancelReplace: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
+    val context = androidx.compose.ui.platform.LocalContext.current
     var query by remember { mutableStateOf("") }
     var searchOpen by remember { mutableStateOf(false) }
     var starredOnly by remember { mutableStateOf(false) }
@@ -300,6 +301,10 @@ fun ApkBoxScreen(
                 ActionSheetItem(Icons.Rounded.PlayArrow, "Install") {
                     actionCandidate = null
                     onInstall(record)
+                }
+                ActionSheetItem(Icons.Rounded.Shield, "Unattended install") {
+                    actionCandidate = null
+                    context.startActivity(com.mekromn.apkbox.UnattendedInstallActivity.intent(context, record.id))
                 }
                 ActionSheetItem(
                     if (record.starred) Icons.Rounded.Star else Icons.Rounded.StarBorder,
