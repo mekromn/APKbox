@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.OutputStream
 import java.security.PrivateKey
 import java.security.cert.Certificate
 import java.util.concurrent.TimeUnit
@@ -351,6 +352,127 @@ class AdbBridgeManager(context: Context) {
     }
 
     /**
+     * Creates an ADB PackageInstaller session, lets the caller write and verify the exact APK bytes,
+     * and only commits after the writer returns successfully. This is the path used by APKbox's
+     * user-selected Unattended install action so vault reconstruction can remain zero-copy while
+     * retaining a hard pre-commit integrity barrier.
+     */
+    suspend fun installVerifiedStream(
+        totalBytes: Long,
+        allowDowngrade: Boolean = false,
+        writer: suspend (OutputStream) -> Unit,
+    ): AdbInstallResult = withContext(Dispatchers.IO) {
+        require(totalBytes > 0L) { "Refusing to install an empty APK." }
+        check(ensureConnected()) { healFailureMessage() }
+
+        installMutex.withLock {
+            val started = System.currentTimeMillis()
+            var sessionId = -1
+            var bytesSent = 0L
+            try {
+                val createCommand = buildString {
+                    append("pm install-create -r ")
+                    if (allowDowngrade) append("-d ")
+                    append("-S ").append(totalBytes)
+                }
+                val created = execute(createCommand, 30)
+                check(!created.timedOut && (created.exitCode == null || created.exitCode == 0)) {
+                    "Android could not create an unattended install session: ${created.output.take(2_000)}"
+                }
+                sessionId = parseInstallSessionId(created.output)
+                    ?: error("Android did not return an install session ID: ${created.output.take(2_000)}")
+
+                val writeStream = connection.openStream(
+                    "shell:pm install-write -S $totalBytes $sessionId base.apk -"
+                )
+                val writeOutput = try {
+                    coroutineScope {
+                        val reader = async(Dispatchers.IO) {
+                            val (bytes, _) = readBounded(writeStream.openInputStream(), 256 * 1024)
+                            String(bytes, Charsets.UTF_8).trim()
+                        }
+                        try {
+                            withTimeout(INSTALL_TIMEOUT_MS) {
+                                val rawSink = writeStream.openOutputStream()
+                                val countingSink = object : OutputStream() {
+                                    override fun write(value: Int) {
+                                        rawSink.write(value)
+                                        bytesSent++
+                                    }
+
+                                    override fun write(buffer: ByteArray, offset: Int, length: Int) {
+                                        rawSink.write(buffer, offset, length)
+                                        bytesSent += length
+                                    }
+
+                                    override fun flush() {
+                                        rawSink.flush()
+                                    }
+                                }
+                                writer(countingSink)
+                                countingSink.flush()
+                                check(bytesSent == totalBytes) {
+                                    "ADB install session received $bytesSent of $totalBytes bytes."
+                                }
+                                reader.await()
+                            }
+                        } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                            reader.cancel()
+                            throw timeout
+                        }
+                    }
+                } finally {
+                    runCatching { writeStream.close() }
+                    refreshStatus()
+                }
+
+                if (!writeOutput.lineSequence().any { it.trim().equals("Success", ignoreCase = true) }) {
+                    abandonInstallSession(sessionId)
+                    return@withLock AdbInstallResult(
+                        success = false,
+                        output = writeOutput.ifBlank { "Android rejected the APK stream before commit." },
+                        durationMs = System.currentTimeMillis() - started,
+                        bytesSent = bytesSent,
+                    )
+                }
+
+                // The writer has now returned, which means APKbox's staging SHA-256 verification
+                // succeeded. Only now is Android allowed to mutate the installed package.
+                val committed = execute("pm install-commit $sessionId", 120)
+                val success = !committed.timedOut &&
+                    committed.output.lineSequence().any { it.trim().startsWith("Success", ignoreCase = true) }
+                if (success) {
+                    markHealthy()
+                } else {
+                    abandonInstallSession(sessionId)
+                }
+                AdbInstallResult(
+                    success = success,
+                    output = committed.output.ifBlank {
+                        if (success) "Success" else "Android package manager returned no commit result."
+                    },
+                    durationMs = System.currentTimeMillis() - started,
+                    bytesSent = bytesSent,
+                    timedOut = committed.timedOut,
+                )
+            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                if (sessionId >= 0) abandonInstallSession(sessionId)
+                AdbInstallResult(
+                    success = false,
+                    output = "Unattended ADB install timed out after ${INSTALL_TIMEOUT_MS / 1_000L} seconds.",
+                    durationMs = System.currentTimeMillis() - started,
+                    bytesSent = bytesSent,
+                    timedOut = true,
+                )
+            } catch (failure: Throwable) {
+                if (sessionId >= 0) abandonInstallSession(sessionId)
+                refreshStatus()
+                throw failure
+            }
+        }
+    }
+
+    /**
      * Streams an already-verified APK directly to Android's package manager over the paired ADB
      * channel. No world-readable staging path is created. The `-S` byte count lets package manager
      * consume exactly the file length from stdin and complete without relying on an EOF signal.
@@ -410,8 +532,8 @@ class AdbBridgeManager(context: Context) {
                                 bytesSent = bytesSent,
                             )
                         } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
-                            reader.cancel()
                             runCatching { stream.close() }
+                            reader.cancel()
                             AdbInstallResult(
                                 success = false,
                                 output = "Unattended ADB install timed out after ${INSTALL_TIMEOUT_MS / 1_000L} seconds.",
@@ -490,6 +612,14 @@ class AdbBridgeManager(context: Context) {
         runCatching { connection.disconnect() }
         recordHealFailure(failure)
     }
+
+    private suspend fun abandonInstallSession(sessionId: Int) {
+        if (sessionId < 0) return
+        runCatching { execute("pm install-abandon $sessionId", 10) }
+    }
+
+    private fun parseInstallSessionId(output: String): Int? =
+        Regex("\\[(\\d+)]").find(output)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     private fun recordHealFailure(failure: Throwable) =
         recordHealFailure(failure.message ?: failure.javaClass.simpleName)
