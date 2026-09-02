@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -19,6 +20,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
+import java.security.MessageDigest
 
 class RemoteBridgeService : Service() {
     companion object {
@@ -33,8 +36,6 @@ class RemoteBridgeService : Service() {
         private const val APPROVAL_CHANNEL = "apkbox-remote-bridge-approval"
         private const val SERVICE_NOTIFICATION_ID = 73_001
         private const val APPROVAL_NOTIFICATION_ID = 73_002
-        // state.json is a Git commit in the private Continuity relay. Write immediately when
-        // meaningful state changes, but only issue an unchanged liveness keepalive every six hours.
         private const val HEARTBEAT_KEEPALIVE_MS = 6L * 60L * 60L * 1_000L
         private const val ADB_RECONNECT_INTERVAL_MS = 15_000L
 
@@ -173,8 +174,6 @@ class RemoteBridgeService : Service() {
     private suspend fun pollInbox(config: BridgeConfig, token: String) {
         val items = relay.fetchInbox(config, token)
         for (item in items) {
-            // A completed journal means this request already executed. flushCompleted() will retry
-            // delivery/deletion; never execute it twice if GitHub was unavailable after execution.
             if (stateStore.hasCompleted(item.request.id)) continue
             val request = item.request
             val risk = BridgePolicy.classify(request)
@@ -219,8 +218,6 @@ class RemoteBridgeService : Service() {
                 success = true,
             )
             BridgeRuntime.update { it.copy(pendingRequestId = request.id) }
-            // High-importance approval notification produces Android's heads-up popup while keeping
-            // the actual approval activity non-exported. The notification contains inline actions.
             showApproval(pending)
             break
         }
@@ -249,9 +246,44 @@ class RemoteBridgeService : Service() {
 
     private suspend fun flushCompleted(config: BridgeConfig, token: String) {
         for (completed in stateStore.loadCompleted()) {
-            // Order is deliberate. The journal survives until BOTH result delivery and inbox
-            // removal succeed. GitHubRelayClient treats only a genuine 404 inbox as already removed.
-            relay.writeResult(config, token, completed.result)
+            var deliverable = completed.result
+            var localArtifactPath: String? = null
+
+            if (completed.request.type == BridgeCommandType.SCREENSHOT &&
+                completed.result.output.startsWith(ScreenAgentController.LOCAL_ARTIFACT_PREFIX)
+            ) {
+                val path = completed.result.output.removePrefix(ScreenAgentController.LOCAL_ARTIFACT_PREFIX)
+                val file = File(path)
+                check(file.isFile) { "Journaled screenshot artifact is missing: $path" }
+                val bytes = file.readBytes()
+                val relayPath = relay.writeArtifact(
+                    config = config,
+                    token = token,
+                    requestId = completed.request.id,
+                    extension = "jpg",
+                    bytes = bytes,
+                )
+                val options = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                deliverable = completed.result.copy(
+                    output = "",
+                    artifacts = listOf(
+                        BridgeArtifact(
+                            path = relayPath,
+                            mimeType = "image/jpeg",
+                            sha256 = sha256(bytes),
+                            bytes = bytes.size.toLong(),
+                            width = options.outWidth,
+                            height = options.outHeight,
+                        )
+                    ),
+                )
+                localArtifactPath = path
+            }
+
+            // The local completion journal survives until artifact delivery (if any), result write,
+            // and inbox deletion have all succeeded. A retry uploads the exact same bytes.
+            relay.writeResult(config, token, deliverable)
             relay.deleteInbox(
                 config = config,
                 token = token,
@@ -259,6 +291,7 @@ class RemoteBridgeService : Service() {
                 sha = completed.inboxSha,
                 requestId = completed.request.id,
             )
+            localArtifactPath?.let(executor::deleteLocalArtifact)
             stateStore.clearCompleted(completed.request.id)
         }
     }
@@ -352,6 +385,10 @@ class RemoteBridgeService : Service() {
                         pending.request.command.takeIf { it.isNotBlank() }?.let {
                             append("\n\n")
                             append(it.take(2_000))
+                        }
+                        pending.request.selector.takeIf { it.isNotBlank() }?.let {
+                            append("\n\nSelector: ")
+                            append(it.take(500))
                         }
                     }
                 )
@@ -453,6 +490,14 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.TOAST -> request.message.take(220)
         BridgeCommandType.NOTIFICATION -> request.message.take(220)
         BridgeCommandType.POPUP -> request.message.take(220)
+        BridgeCommandType.UI_SNAPSHOT -> "Read current UI hierarchy"
+        BridgeCommandType.SCREENSHOT -> "Capture current screen"
+        BridgeCommandType.UI_TAP -> "Tap ${request.x},${request.y} in ${request.packageName}"
+        BridgeCommandType.UI_FIND_TAP -> "Tap '${request.selector}' in ${request.packageName}"
+        BridgeCommandType.UI_SWIPE -> "Swipe in ${request.packageName}"
+        BridgeCommandType.UI_TEXT -> "Type text in ${request.packageName}"
+        BridgeCommandType.UI_KEY -> "Send key ${request.keyCode} in ${request.packageName}"
+        BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
     }
 
     private fun recordRelayFailure(failure: Throwable) {
@@ -461,6 +506,9 @@ class RemoteBridgeService : Service() {
         stateStore.addEvent("Relay error", detail, success = false)
         updateForeground("Relay retrying · ${detail.take(80)}")
     }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun stopBridge() {
         loopJob?.cancel()
