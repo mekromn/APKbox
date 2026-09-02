@@ -119,7 +119,8 @@ class GitHubRelayClient {
             .put("message", "APKbox consumed bridge request $requestId")
             .put("sha", sha)
             .toString()
-        request(
+        // 404 is success here: another successful retry may already have removed the inbox file.
+        requestOrNull(
             token = token,
             method = "DELETE",
             path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
