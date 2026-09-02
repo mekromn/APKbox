@@ -129,6 +129,7 @@ class BridgeActivity : ComponentActivity() {
                     consoleOutput = output,
                     onBack = { finish() },
                     onEnabled = ::setBridgeEnabled,
+                    onAutoPair = ::startAutoPair,
                     onPair = ::pairAdb,
                     onConnect = ::connectAdb,
                     onOpenWirelessDebugging = ::openWirelessDebugging,
@@ -178,6 +179,15 @@ class BridgeActivity : ComponentActivity() {
         prefs.setEnabled(true)
         RemoteBridgeService.start(this)
         message.value = "Remote Bridge enabled. Approval prompts will stay visible in notifications."
+    }
+
+    private fun startAutoPair() {
+        val alreadyEnabled = PairingAssistantService.request(this)
+        message.value = if (alreadyEnabled) {
+            "Pairing Assistant started. APKbox will navigate Developer options, read the temporary pairing code locally, discover the pairing port, pair, and return here."
+        } else {
+            "Enable APKbox Pairing Assistant in Accessibility. As soon as the service starts, APKbox will continue the Wireless ADB pairing flow automatically and disable the accessibility service after success."
+        }
     }
 
     private fun pairAdb(portText: String, code: String) {
@@ -289,6 +299,7 @@ private fun BridgeScreen(
     consoleOutput: String,
     onBack: () -> Unit,
     onEnabled: (Boolean) -> Unit,
+    onAutoPair: () -> Unit,
     onPair: (String, String) -> Unit,
     onConnect: () -> Unit,
     onOpenWirelessDebugging: () -> Unit,
@@ -358,10 +369,26 @@ private fun BridgeScreen(
 
             BridgeCard(Icons.Rounded.Link, "1 · Pair this phone's Wireless ADB") {
                 Text(
-                    "Open Developer options → Wireless debugging → Pair device with pairing code. Enter the temporary pairing port and six-digit code below. APKbox keeps the ADB private identity AES-GCM encrypted at rest by Android Keystore.",
+                    "APKbox can bootstrap Wireless ADB itself. Auto-open & pair navigates Pixel Developer options, opens the pairing-code dialog, reads the temporary six-digit code only from Android Settings, discovers the pairing port through Android's local ADB mDNS advertisement, pairs, and then disables its one-shot Accessibility helper.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Button(
+                    enabled = !busy,
+                    onClick = onAutoPair,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.DeveloperMode, null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Auto-open & pair")
+                }
+                Text(
+                    "First use requires enabling APKbox Pairing Assistant in Android Accessibility settings. That permission is used only for com.android.settings and is automatically dropped after pairing succeeds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider()
+                Text("Manual fallback", fontWeight = FontWeight.SemiBold)
                 OutlinedButton(onClick = onOpenWirelessDebugging, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Rounded.DeveloperMode, null)
                     Spacer(Modifier.size(8.dp))
