@@ -39,6 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -188,7 +189,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun archiveAndInstall(projectChoice: String) {
+    private fun archiveAndInstall(projectChoice: String, unattended: Boolean) {
         val prepared = preparedApk ?: return
         val incoming = prepared.preview
         if (busy.value) return
@@ -221,7 +222,12 @@ class OpenApkInstallerActivity : ComponentActivity() {
                     "Archived APK identity changed unexpectedly. Installation cancelled."
                 }
                 busy.value = false
-                requestInstall(record)
+                if (unattended) {
+                    startActivity(UnattendedInstallActivity.intent(this@OpenApkInstallerActivity, record.id))
+                    finish()
+                } else {
+                    requestInstall(record)
+                }
             } catch (t: Throwable) {
                 message.value = t.message ?: "APKbox could not archive this APK."
                 busy.value = false
@@ -310,7 +316,7 @@ private fun OpenApkInstallerScreen(
     replaceRequest: ReplaceRequest?,
     installProgress: InstallProgress?,
     onCancel: () -> Unit,
-    onArchiveAndInstall: (String) -> Unit,
+    onArchiveAndInstall: (String, Boolean) -> Unit,
     onConfirmReplace: () -> Unit,
     onCancelReplace: () -> Unit,
 ) {
@@ -354,12 +360,17 @@ private fun OpenApkInstallerScreen(
                     color = MaterialTheme.colorScheme.surface,
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TextButton(enabled = !busy, onClick = onCancel) { Text("Cancel") }
-                        Button(enabled = !busy, onClick = { onArchiveAndInstall(selected) }) {
-                            Text("Archive & install")
+                        Spacer(Modifier.weight(1f))
+                        OutlinedButton(enabled = !busy, onClick = { onArchiveAndInstall(selected, false) }) {
+                            Text("Install")
+                        }
+                        Button(enabled = !busy, onClick = { onArchiveAndInstall(selected, true) }) {
+                            Text("Unattended")
                         }
                     }
                 }
@@ -456,7 +467,7 @@ private fun OpenApkInstallerScreen(
 
                     Spacer(Modifier.size(16.dp))
                     Text(
-                        "APKbox archives and verifies the exact APK first. Android's normal installation confirmation appears afterward.",
+                        "Both choices archive and verify the exact APK first. Install uses Android's normal confirmation; Unattended uses APKbox's paired self-healing Wireless ADB connection and verifies the installed APK SHA-256 afterward.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
