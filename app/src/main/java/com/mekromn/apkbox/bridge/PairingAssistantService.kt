@@ -196,6 +196,16 @@ class PairingAssistantService : AccessibilityService() {
         // has no clickable ancestor, so this naturally becomes a no-op once we are already there.
         if (text.any { it.equals("Wireless debugging", ignoreCase = true) }) {
             if (clickByText(root, listOf("Wireless debugging"), exact = true)) markUiAction(now)
+            return
+        }
+
+        // Pixel's Wireless debugging preference is normally below the first Developer options
+        // screenful. Scroll one page at a time until the preference enters the accessibility tree.
+        if (text.any { it.equals("Developer options", ignoreCase = true) }) {
+            val scrollable = nodes.firstOrNull { it.isVisibleToUser && it.isScrollable }
+            if (scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true) {
+                markUiAction(now)
+            }
         }
     }
 
