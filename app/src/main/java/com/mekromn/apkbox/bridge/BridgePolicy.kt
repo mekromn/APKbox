@@ -2,6 +2,7 @@ package com.mekromn.apkbox.bridge
 
 object BridgePolicy {
     private val shellMetacharacters = Regex("[;&|`><\\n\\r]|\\$\\(|\\$\\{")
+    private val runIdRegex = Regex("[A-Za-z0-9._-]{1,96}")
 
     private val readOnlyExact = setOf(
         "id",
@@ -77,7 +78,7 @@ object BridgePolicy {
                 else -> allowInformational
             }
             BridgeRisk.READ_ONLY -> trustedUntilEpochMs > now
-            BridgeRisk.DEBUG_ACTION -> trustedUntilEpochMs > now && debugActionIsPackageScoped(request)
+            BridgeRisk.DEBUG_ACTION -> trustedUntilEpochMs > now && debugActionIsSafelyScoped(request)
             BridgeRisk.MUTATING,
             BridgeRisk.DANGEROUS -> false
         }
@@ -85,20 +86,29 @@ object BridgePolicy {
 
     fun trustedSessionEligible(request: BridgeRequest): Boolean = when (classify(request)) {
         BridgeRisk.READ_ONLY -> true
-        BridgeRisk.DEBUG_ACTION -> debugActionIsPackageScoped(request)
+        BridgeRisk.DEBUG_ACTION -> debugActionIsSafelyScoped(request)
         else -> false
     }
 
-    private fun debugActionIsPackageScoped(request: BridgeRequest): Boolean = when (request.type) {
+    /**
+     * Autonomous screen interaction needs both package scope and run/sequence scope. A one-off
+     * manually approved UI action may omit run metadata, but it can never inherit trusted-session
+     * auto-execution in that form. LAUNCH remains the existing low-impact package-scoped debug
+     * action and does not require a run ledger unless the caller supplies one.
+     */
+    private fun debugActionIsSafelyScoped(request: BridgeRequest): Boolean = when (request.type) {
         BridgeCommandType.LAUNCH -> validPackage(request.packageName)
         BridgeCommandType.UI_TAP,
         BridgeCommandType.UI_FIND_TAP,
         BridgeCommandType.UI_SWIPE,
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
-        BridgeCommandType.UI_WAIT -> validPackage(request.packageName)
+        BridgeCommandType.UI_WAIT -> validPackage(request.packageName) && validRunSequence(request)
         else -> false
     }
+
+    private fun validRunSequence(request: BridgeRequest): Boolean =
+        runIdRegex.matches(request.runId) && request.sequenceNumber > 0L
 
     private fun validPackage(value: String): Boolean =
         value.matches(Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+"))
