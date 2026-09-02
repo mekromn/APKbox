@@ -10,6 +10,15 @@
     <!-- Optional direct-storage access powers APKbox's own APK-focused file browser and Auto Scanner. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- Remote Debug Bridge: private GitHub relay + same-device Wireless ADB/mDNS. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <application
         android:name=".ApkBoxApplication"
         android:allowBackup="false"
@@ -73,6 +82,31 @@
             android:exported="false"
             android:screenOrientation="unspecified" />
 
+        <!-- Remote bridge UI is app-internal. Only APKbox itself can invoke approval/message screens. -->
+        <activity
+            android:name=".bridge.BridgeActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified" />
+        <activity
+            android:name=".bridge.BridgeApprovalActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="unspecified" />
+        <activity
+            android:name=".bridge.BridgeMessageActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="unspecified" />
+
+        <service
+            android:name=".bridge.RemoteBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled ChatGPT remote debugging relay and same-device Wireless ADB bridge" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
@@ -93,6 +127,14 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.DOWNLOAD_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".bridge.BridgeBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
     </application>
