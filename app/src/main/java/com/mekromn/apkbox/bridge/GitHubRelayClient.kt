@@ -102,7 +102,7 @@ class GitHubRelayClient {
         adbStatus: AdbBridgeStatus,
     ) = withContext(Dispatchers.IO) {
         val json = JSONObject()
-            .put("schema", 2)
+            .put("schema", 3)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
@@ -111,6 +111,15 @@ class GitHubRelayClient {
             .put("bridgeEnabled", config.enabled)
             .put("adbPaired", config.paired)
             .put("adbConnected", adbStatus.connected)
+            .put("adbHealPhase", adbStatus.healPhase.name)
+            .put("adbLastConnectedAtEpochMs", adbStatus.lastConnectedAtEpochMs)
+            .put("adbLastVerifiedAtEpochMs", adbStatus.lastVerifiedAtEpochMs)
+            .put("adbConsecutiveFailures", adbStatus.consecutiveFailures)
+            .put("adbNextRetryAtEpochMs", adbStatus.nextRetryAtEpochMs)
+            .put("adbWifiAvailable", adbStatus.wifiAvailable)
+            .put("adbUserActionRequired", adbStatus.userActionRequired)
+            .put("adbFailureKind", adbStatus.lastFailureKind.name)
+            .put("adbLastError", adbStatus.lastError.take(500))
             .put("trustedUntilEpochMs", config.trustedUntilEpochMs)
             .put("allowInformational", config.allowInformational)
             .put("allowPopups", config.allowPopups)
@@ -118,7 +127,7 @@ class GitHubRelayClient {
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
-                "agent_checkpoint", "conversation_handoff"
+                "agent_checkpoint", "conversation_handoff", "wireless_adb_auto_heal"
             )))
         val path = "bridge/devices/${config.deviceId}/state.json"
         putJson(config, token, path, json, "APKbox bridge heartbeat")
