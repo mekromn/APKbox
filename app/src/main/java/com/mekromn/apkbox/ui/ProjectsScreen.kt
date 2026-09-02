@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mekromn.apkbox.AutoScanActivity
+import com.mekromn.apkbox.bridge.BridgeActivity
 import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
@@ -94,6 +95,13 @@ fun ProjectsScreen(
                                 Icon(Icons.Rounded.MoreVert, contentDescription = "Vault options")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Remote Debug Bridge") },
+                                    onClick = {
+                                        menuOpen = false
+                                        context.startActivity(Intent(context, BridgeActivity::class.java))
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Auto Scanner") },
                                     onClick = {
