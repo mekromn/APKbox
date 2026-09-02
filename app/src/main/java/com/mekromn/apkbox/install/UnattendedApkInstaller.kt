@@ -11,17 +11,17 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.io.OutputStream
 
 /**
  * User-facing unattended install path.
  *
- * Unlike PackageInstaller's normal confirmation flow, this path uses APKbox's already-paired
- * same-device Wireless ADB shell. APK fidelity stays non-negotiable: vault bytes are reconstructed
- * and full-file SHA-256 verified before package-manager mutation begins. A prepared gateway source
- * is re-verified against the stored record before it is streamed. After Android reports success,
- * APKbox hashes the installed base.apk through ADB and requires it to match the archived APK.
+ * Unlike PackageInstaller's normal confirmation flow, this path uses APKbox's already-paired,
+ * self-healing same-device Wireless ADB connection. The archived APK is never materialized as a
+ * second APKbox cache file: FastApkStager streams either the verified gateway source or the parallel
+ * vault reconstruction directly into an ADB PackageInstaller session. Android is allowed to commit
+ * that session only after the complete outgoing SHA-256 has matched the archived record. After
+ * Android reports success, APKbox hashes the installed base.apk and requires that SHA-256 to match
+ * too.
  *
  * Signature mismatch is intentionally handled by callers before this class is invoked. This class
  * never performs an implicit uninstall, clear-data, or destructive fallback.
@@ -32,7 +32,7 @@ class UnattendedApkInstaller(
 ) {
     companion object {
         private const val SAFETY_RESERVE_BYTES = 256L * 1024L * 1024L
-        private const val TEMP_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
+        private const val WRITE_BUFFER_BYTES = 4 * 1024 * 1024
         private const val MIB = 1024L * 1024L
         private val packageRegex = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
         private val installedPathRegex = Regex("[/A-Za-z0-9._=:+-]+")
@@ -40,7 +40,6 @@ class UnattendedApkInstaller(
 
     private val appContext = context.applicationContext
     private val fastStager = FastApkStager(appContext)
-    private val tempDir = File(appContext.cacheDir, "apkbox-unattended-install").apply { mkdirs() }
     private val mutex = Mutex()
 
     suspend fun install(
@@ -50,77 +49,58 @@ class UnattendedApkInstaller(
         onProgress: ((InstallProgress) -> Unit)? = null,
     ): AdbInstallResult = withContext(Dispatchers.IO) {
         mutex.withLock {
-            cleanupTemps()
             require(packageRegex.matches(record.packageName)) { "Stored APK has an invalid package name." }
 
             val plan = fastStager.plan(record)
             val exactSize = plan.exactSize
             check(exactSize > 0L) { "Stored APK manifest has an invalid size." }
 
-            val verifiedSource = if (preparedSource?.isFile == true) {
-                // The gateway scratch file was already hashed while being prepared/imported, but
-                // verify it again immediately before handing bytes to the privileged ADB installer.
-                fastStager.stagePreparedFile(
-                    record = record,
-                    plan = plan,
-                    sourceFile = preparedSource,
-                    output = NullOutputStream,
-                )
-                checkAdditionalSpace(exactSize, fullCopiesNeeded = 2)
-                preparedSource
-            } else {
-                // ADB's one-shot `pm install -S` commits as soon as it receives the full stream, so
-                // do not discover a vault checksum problem after bytes have already reached package
-                // manager. Reconstruct and verify one private temporary APK first, then stream it.
-                checkAdditionalSpace(exactSize, fullCopiesNeeded = 3)
-                val target = File(tempDir, "${sanitize(record.id)}-${System.nanoTime()}.apk")
-                try {
-                    FileOutputStream(target).use { fileOutput ->
-                        BufferedOutputStream(fileOutput, TEMP_WRITE_BUFFER_BYTES).use { output ->
-                            fastStager.stageVault(
-                                record = record,
-                                plan = plan,
-                                output = output,
-                            )
-                        }
-                    }
-                    check(target.isFile && target.length() == exactSize) {
-                        "Verified unattended-install staging file has the wrong size."
-                    }
-                    target
-                } catch (failure: Throwable) {
-                    target.delete()
-                    throw failure
-                }
-            }
+            // Android may briefly need one full staged copy plus the destination package copy. The
+            // old implementation needed a third full copy for APKbox's own verified temp file; the
+            // pre-commit streaming session eliminates that copy entirely.
+            checkAdditionalSpace(exactSize, fullCopiesNeeded = 2)
 
-            try {
-                val result = adb.installApk(
-                    apkFile = verifiedSource,
-                    allowDowngrade = allowDowngrade,
-                    onProgress = { sent, total ->
-                        onProgress?.invoke(
-                            InstallProgress(
-                                bytesWritten = sent,
-                                totalBytes = total,
-                                directPreparedSource = preparedSource?.isFile == true,
-                            )
+            val result = adb.installVerifiedStream(
+                totalBytes = exactSize,
+                allowDowngrade = allowDowngrade,
+            ) { rawOutput ->
+                val output = BufferedOutputStream(rawOutput, WRITE_BUFFER_BYTES)
+                val progressBridge: (FastApkStager.Progress) -> Unit = { progress ->
+                    onProgress?.invoke(
+                        InstallProgress(
+                            bytesWritten = progress.bytesWritten,
+                            totalBytes = progress.totalBytes,
+                            directPreparedSource = progress.source == FastApkStager.Source.PREPARED_FILE,
                         )
-                    },
-                )
-                check(result.success) {
-                    val detail = result.output.trim().ifBlank { "Android package manager rejected the APK." }
-                    "Unattended install failed: ${detail.take(2_000)}"
+                    )
                 }
 
-                verifyInstalledBaseSha(record)
-                result
-            } finally {
-                if (runCatching { verifiedSource.parentFile?.canonicalFile == tempDir.canonicalFile }.getOrDefault(false)) {
-                    verifiedSource.delete()
+                if (preparedSource?.isFile == true) {
+                    fastStager.stagePreparedFile(
+                        record = record,
+                        plan = plan,
+                        sourceFile = preparedSource,
+                        output = output,
+                        onProgress = progressBridge,
+                    )
+                } else {
+                    fastStager.stageVault(
+                        record = record,
+                        plan = plan,
+                        output = output,
+                        onProgress = progressBridge,
+                    )
                 }
-                cleanupTemps()
+                output.flush()
             }
+
+            check(result.success) {
+                val detail = result.output.trim().ifBlank { "Android package manager rejected the APK." }
+                "Unattended install failed: ${detail.take(2_000)}"
+            }
+
+            verifyInstalledBaseSha(record)
+            result
         }
     }
 
@@ -164,22 +144,9 @@ class UnattendedApkInstaller(
         }
     }
 
-    private fun cleanupTemps() {
-        tempDir.mkdirs()
-        tempDir.listFiles().orEmpty().forEach { runCatching { it.delete() } }
-    }
-
-    private fun sanitize(value: String): String =
-        value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(96).ifBlank { "apk" }
-
     private fun toMiB(bytes: Long): Long = when {
         bytes <= 0L -> 0L
         bytes == Long.MAX_VALUE -> Long.MAX_VALUE / MIB
         else -> bytes / MIB + if (bytes % MIB == 0L) 0L else 1L
-    }
-
-    private object NullOutputStream : OutputStream() {
-        override fun write(b: Int) = Unit
-        override fun write(b: ByteArray, off: Int, len: Int) = Unit
     }
 }
