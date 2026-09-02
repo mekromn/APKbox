@@ -1,6 +1,8 @@
 package com.mekromn.apkbox
 
 import android.content.Context
+import com.mekromn.apkbox.agent.AutonomousPlanRunner
+import com.mekromn.apkbox.agent.BuildRunner
 import com.mekromn.apkbox.bridge.AdbBridgeManager
 import com.mekromn.apkbox.bridge.BridgeExecutor
 import com.mekromn.apkbox.bridge.BridgePreferences
@@ -10,9 +12,10 @@ import com.mekromn.apkbox.data.AutoScanManager
 import com.mekromn.apkbox.data.LibraryStore
 
 /**
- * Process-local service graph so UI, broadcast receivers, background scanners, and the remote
- * bridge share one writer/connection and one set of StateFlows. Master restore only resets vault
- * services; bridge identity and ADB pairing deliberately live independently of the APK vault.
+ * Process-local service graph so UI, broadcast receivers, background scanners, build automation,
+ * and the remote bridge share one writer/connection and one set of StateFlows. Master restore only
+ * resets services that retain vault references; bridge identity and ADB pairing deliberately live
+ * independently of the APK vault.
  */
 object ApkBoxServices {
     private val lock = Any()
@@ -24,6 +27,8 @@ object ApkBoxServices {
     @Volatile private var adbBridgeManagerInstance: AdbBridgeManager? = null
     @Volatile private var relayClientInstance: GitHubRelayClient? = null
     @Volatile private var bridgeExecutorInstance: BridgeExecutor? = null
+    @Volatile private var autonomousPlanRunnerInstance: AutonomousPlanRunner? = null
+    @Volatile private var buildRunnerInstance: BuildRunner? = null
 
     fun libraryStore(context: Context): LibraryStore =
         libraryStoreInstance ?: synchronized(lock) {
@@ -77,10 +82,29 @@ object ApkBoxServices {
             ).also { bridgeExecutorInstance = it }
         }
 
+    fun autonomousPlanRunner(context: Context): AutonomousPlanRunner =
+        autonomousPlanRunnerInstance ?: synchronized(lock) {
+            autonomousPlanRunnerInstance ?: AutonomousPlanRunner(
+                context = context.applicationContext,
+                adb = adbBridge(context.applicationContext),
+                executor = bridgeExecutor(context.applicationContext),
+            ).also { autonomousPlanRunnerInstance = it }
+        }
+
+    fun buildRunner(context: Context): BuildRunner =
+        buildRunnerInstance ?: synchronized(lock) {
+            buildRunnerInstance ?: BuildRunner(
+                context = context.applicationContext,
+                library = libraryStore(context.applicationContext),
+                adb = adbBridge(context.applicationContext),
+            ).also { buildRunnerInstance = it }
+        }
+
     fun resetVaultServices() {
         synchronized(lock) {
             autoScanManagerInstance?.shutdown()
             autoScanManagerInstance = null
+            buildRunnerInstance = null
             libraryStoreInstance = null
         }
     }
