@@ -105,7 +105,9 @@ private fun ApprovalScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         OutlinedButton(onClick = onDeny, modifier = Modifier.weight(1f)) { Text("Deny") }
-                        Button(onClick = onAllowOnce, modifier = Modifier.weight(1f)) { Text("Allow once") }
+                        Button(onClick = onAllowOnce, modifier = Modifier.weight(1f)) {
+                            Text(if (request.type == BridgeCommandType.AGENT_START) "Start plan" else "Allow once")
+                        }
                     }
                 }
             }
@@ -144,6 +146,10 @@ private fun ApprovalScreen(
 
             InfoSection("Why ChatGPT wants this", request.reason.ifBlank { "No reason was supplied." })
             InfoSection("Action", requestSummaryForApproval(request))
+            if (request.type == BridgeCommandType.AGENT_START) {
+                InfoSection("Run ID", request.runId.ifBlank { "Missing" })
+                InfoSection("Target app", request.packageName.ifBlank { "Missing" })
+            }
 
             if (request.command.isNotBlank()) {
                 Surface(
@@ -167,12 +173,19 @@ private fun ApprovalScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                when (pending.risk) {
-                    BridgeRisk.READ_ONLY -> "Read-only debugging can be covered by a temporary trusted session."
-                    BridgeRisk.DEBUG_ACTION -> "Debug actions and package-scoped UI control can be covered by a temporary trusted session."
-                    BridgeRisk.INFO -> "This is informational only and does not receive shell privileges."
-                    BridgeRisk.MUTATING -> "This can change device or app state. APKbox never auto-approves it."
-                    BridgeRisk.DANGEROUS -> "This is arbitrary or high-risk shell access. APKbox never auto-approves it."
+                when {
+                    request.type == BridgeCommandType.AGENT_START ->
+                        "This approves one bounded autonomous plan for the named app. Plan starts never inherit an earlier trusted session."
+                    pending.risk == BridgeRisk.READ_ONLY ->
+                        "Read-only debugging can be covered by a temporary trusted session."
+                    pending.risk == BridgeRisk.DEBUG_ACTION ->
+                        "Package-scoped debug actions can be covered by a temporary trusted session when the action is eligible."
+                    pending.risk == BridgeRisk.INFO ->
+                        "This is informational only and does not receive shell privileges."
+                    pending.risk == BridgeRisk.MUTATING ->
+                        "This can change device or app state. APKbox never auto-approves it."
+                    else ->
+                        "This is arbitrary or high-risk shell access. APKbox never auto-approves it."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -228,4 +241,5 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.UI_TEXT -> "Type text into the foreground ${request.packageName} UI"
     BridgeCommandType.UI_KEY -> "Send Android key code ${request.keyCode} while ${request.packageName} is foreground"
     BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
+    BridgeCommandType.AGENT_START -> "Fetch, validate, and execute bounded autonomous plan '${request.runId}' for ${request.packageName}"
 }
