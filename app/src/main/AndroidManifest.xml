@@ -120,6 +120,24 @@
                 android:value="User-enabled ChatGPT remote debugging relay and same-device Wireless ADB bridge" />
         </service>
 
+        <!--
+          Optional one-shot Wireless ADB bootstrap helper. Android Settings is the only package the
+          service can inspect; BIND_ACCESSIBILITY_SERVICE prevents arbitrary apps from binding it.
+          The service disables itself immediately after APKbox pairs successfully.
+        -->
+        <service
+            android:name=".bridge.PairingAssistantService"
+            android:exported="true"
+            android:label="APKbox Pairing Assistant"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/pairing_assistant_service" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
