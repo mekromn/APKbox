@@ -9,6 +9,7 @@ enum class AgentRunState {
     WAITING_FOR_CONTROLLER,
     AUTONOMOUS_TO_CHECKPOINT,
     CHECKPOINT_REACHED,
+    HANDOFF_PENDING,
     PAUSED_CONTROLLER_LOST,
     PAUSED_UNEXPECTED_SCREEN,
     PAUSED_SAFETY_BOUNDARY,
@@ -28,6 +29,17 @@ enum class ChatHandoffState {
     FAILED,
 }
 
+enum class ChatHandoffReason {
+    CONTROLLER_STALL,
+    FORCED_NEW_CHAT,
+    PROACTIVE_SESSION_SPLIT,
+}
+
+enum class SessionHandoffMode {
+    NONE,
+    AFTER_CHECKPOINT,
+}
+
 data class AgentCheckpoint(
     val runId: String,
     val targetPackage: String,
@@ -44,6 +56,10 @@ data class AgentCheckpoint(
     val lastResult: String = "",
     val controllerLeaseUntilEpochMs: Long = 0L,
     val retryBudgetRemaining: Int = 0,
+    val sessionSegmentIndex: Int = 0,
+    val sessionSegmentName: String = "",
+    val nextSessionGoal: String = "",
+    val proactiveHandoffRequested: Boolean = false,
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
 ) {
     fun toJson(): JSONObject = JSONObject()
@@ -63,6 +79,10 @@ data class AgentCheckpoint(
         .put("lastResult", lastResult)
         .put("controllerLeaseUntilEpochMs", controllerLeaseUntilEpochMs)
         .put("retryBudgetRemaining", retryBudgetRemaining)
+        .put("sessionSegmentIndex", sessionSegmentIndex)
+        .put("sessionSegmentName", sessionSegmentName)
+        .put("nextSessionGoal", nextSessionGoal)
+        .put("proactiveHandoffRequested", proactiveHandoffRequested)
         .put("updatedAtEpochMs", updatedAtEpochMs)
 
     companion object {
@@ -82,6 +102,10 @@ data class AgentCheckpoint(
             lastResult = json.optString("lastResult"),
             controllerLeaseUntilEpochMs = json.optLong("controllerLeaseUntilEpochMs"),
             retryBudgetRemaining = json.optInt("retryBudgetRemaining"),
+            sessionSegmentIndex = json.optInt("sessionSegmentIndex"),
+            sessionSegmentName = json.optString("sessionSegmentName"),
+            nextSessionGoal = json.optString("nextSessionGoal"),
+            proactiveHandoffRequested = json.optBoolean("proactiveHandoffRequested", false),
             updatedAtEpochMs = json.optLong("updatedAtEpochMs"),
         )
     }
@@ -96,6 +120,7 @@ data class VisibleChatTurn(
 data class ChatHandoffCheckpoint(
     val runId: String,
     val state: ChatHandoffState,
+    val reason: ChatHandoffReason,
     val sourceConversationUrl: String,
     val transcriptFileName: String,
     val transcriptSha256: String = "",
@@ -104,6 +129,9 @@ data class ChatHandoffCheckpoint(
     val lastCapturedFingerprint: String = "",
     val newConversationUrl: String = "",
     val controllerResumeAttempts: Int = 0,
+    val targetSessionSegmentIndex: Int = 0,
+    val nextSessionGoal: String = "",
+    val bootstrapMessage: String = "",
     val error: String = "",
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
 ) {
@@ -111,6 +139,7 @@ data class ChatHandoffCheckpoint(
         .put("schema", 1)
         .put("runId", runId)
         .put("state", state.name)
+        .put("reason", reason.name)
         .put("sourceConversationUrl", sourceConversationUrl)
         .put("transcriptFileName", transcriptFileName)
         .put("transcriptSha256", transcriptSha256)
@@ -119,6 +148,9 @@ data class ChatHandoffCheckpoint(
         .put("lastCapturedFingerprint", lastCapturedFingerprint)
         .put("newConversationUrl", newConversationUrl)
         .put("controllerResumeAttempts", controllerResumeAttempts)
+        .put("targetSessionSegmentIndex", targetSessionSegmentIndex)
+        .put("nextSessionGoal", nextSessionGoal)
+        .put("bootstrapMessage", bootstrapMessage)
         .put("error", error)
         .put("updatedAtEpochMs", updatedAtEpochMs)
 
@@ -126,6 +158,8 @@ data class ChatHandoffCheckpoint(
         fun fromJson(json: JSONObject): ChatHandoffCheckpoint = ChatHandoffCheckpoint(
             runId = json.getString("runId"),
             state = ChatHandoffState.valueOf(json.getString("state")),
+            reason = runCatching { ChatHandoffReason.valueOf(json.optString("reason")) }
+                .getOrDefault(ChatHandoffReason.CONTROLLER_STALL),
             sourceConversationUrl = json.optString("sourceConversationUrl"),
             transcriptFileName = json.optString("transcriptFileName"),
             transcriptSha256 = json.optString("transcriptSha256"),
@@ -134,10 +168,28 @@ data class ChatHandoffCheckpoint(
             lastCapturedFingerprint = json.optString("lastCapturedFingerprint"),
             newConversationUrl = json.optString("newConversationUrl"),
             controllerResumeAttempts = json.optInt("controllerResumeAttempts"),
+            targetSessionSegmentIndex = json.optInt("targetSessionSegmentIndex"),
+            nextSessionGoal = json.optString("nextSessionGoal"),
+            bootstrapMessage = json.optString("bootstrapMessage"),
             error = json.optString("error"),
             updatedAtEpochMs = json.optLong("updatedAtEpochMs"),
         )
     }
+}
+
+data class SessionSegment(
+    val index: Int,
+    val name: String,
+    val goal: String,
+    val checkpointName: String,
+    val handoffMode: SessionHandoffMode = SessionHandoffMode.NONE,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("index", index)
+        .put("name", name)
+        .put("goal", goal)
+        .put("checkpointName", checkpointName)
+        .put("handoffMode", handoffMode.name)
 }
 
 data class AutonomousPlan(
@@ -147,6 +199,7 @@ data class AutonomousPlan(
     val maxRuntimeSeconds: Int,
     val maxRetriesPerStep: Int,
     val steps: List<AutonomousStep>,
+    val sessionSegments: List<SessionSegment> = emptyList(),
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("schema", 1)
@@ -156,6 +209,7 @@ data class AutonomousPlan(
         .put("maxRuntimeSeconds", maxRuntimeSeconds)
         .put("maxRetriesPerStep", maxRetriesPerStep)
         .put("steps", JSONArray().apply { steps.forEach { put(it.toJson()) } })
+        .put("sessionSegments", JSONArray().apply { sessionSegments.forEach { put(it.toJson()) } })
 }
 
 data class AutonomousStep(
