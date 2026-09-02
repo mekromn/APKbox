@@ -20,6 +20,7 @@ enum class BridgeCommandType {
     UI_TEXT,
     UI_KEY,
     UI_WAIT,
+    AGENT_START,
 }
 
 enum class BridgeRisk {
