@@ -77,6 +77,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Internal user-facing silent install flow backed by the paired same-device ADB bridge. -->
+        <activity
+            android:name=".UnattendedInstallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="unspecified" />
+
         <activity
             android:name=".AutoScanActivity"
             android:exported="false"
