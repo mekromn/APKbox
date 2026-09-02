@@ -20,6 +20,10 @@ class BuildDownloader(
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_BUILD_BYTES = 2L * 1024L * 1024L * 1024L
+        // HttpURLConnection does not expose a named constant for HTTP 416 on the Android/JDK API
+        // level APKbox compiles against. Keep the protocol status local instead of depending on a
+        // non-existent platform symbol.
+        private const val HTTP_RANGE_NOT_SATISFIABLE = 416
     }
 
     suspend fun obtainApk(
@@ -73,7 +77,7 @@ class BuildDownloader(
             val offset = part.takeIf { it.isFile }?.length()?.coerceAtLeast(0L) ?: 0L
             val response = openFollowingRedirects(candidate.downloadUrl, offset, candidate.requiresBuildToken, token)
             try {
-                if (response.responseCode == HttpURLConnection.HTTP_REQUESTED_RANGE_NOT_SATISFIABLE && restartBudget-- > 0) {
+                if (response.responseCode == HTTP_RANGE_NOT_SATISFIABLE && restartBudget-- > 0) {
                     part.delete()
                     continue
                 }
