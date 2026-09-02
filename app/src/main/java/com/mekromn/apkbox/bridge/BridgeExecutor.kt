@@ -26,6 +26,7 @@ class BridgeExecutor(
 
     private val appContext = context.applicationContext
     private val notificationManager = appContext.getSystemService(NotificationManager::class.java)
+    private val screenAgent = ScreenAgentController(appContext, adb)
 
     init {
         createChannels()
@@ -78,6 +79,61 @@ class BridgeExecutor(
                     started,
                 )
                 BridgeCommandType.SHELL -> executeShell(request, risk, request.command, started)
+                BridgeCommandType.UI_SNAPSHOT -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.snapshot(request.id),
+                    started,
+                )
+                BridgeCommandType.SCREENSHOT -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.screenshot(request.id),
+                    started,
+                )
+                BridgeCommandType.UI_TAP -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.tap(request.packageName, request.x, request.y),
+                    started,
+                )
+                BridgeCommandType.UI_FIND_TAP -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.findAndTap(request.packageName, request.selector),
+                    started,
+                )
+                BridgeCommandType.UI_SWIPE -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.swipe(
+                        request.packageName,
+                        request.x,
+                        request.y,
+                        request.endX,
+                        request.endY,
+                        request.durationMs,
+                    ),
+                    started,
+                )
+                BridgeCommandType.UI_TEXT -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.typeText(request.packageName, request.value),
+                    started,
+                )
+                BridgeCommandType.UI_KEY -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.key(request.packageName, request.keyCode),
+                    started,
+                )
+                BridgeCommandType.UI_WAIT -> fromScreenResult(
+                    request,
+                    risk,
+                    screenAgent.waitFor(request.packageName, request.selector, request.timeoutSeconds),
+                    started,
+                )
             }
         }.getOrElse { failure ->
             BridgeResult(
@@ -86,9 +142,28 @@ class BridgeExecutor(
                 risk = risk,
                 detail = failure.message ?: failure.javaClass.simpleName,
                 durationMs = System.currentTimeMillis() - started,
+                foregroundPackage = runCatching { screenAgent.foregroundPackage() }.getOrDefault(""),
             )
         }
     }
+
+    fun deleteLocalArtifact(path: String) = screenAgent.deleteLocalArtifact(path)
+
+    private fun fromScreenResult(
+        request: BridgeRequest,
+        risk: BridgeRisk,
+        result: ScreenActionResult,
+        started: Long,
+    ): BridgeResult = BridgeResult(
+        requestId = request.id,
+        status = BridgeResultStatus.SUCCESS,
+        risk = risk,
+        detail = result.detail,
+        output = result.output,
+        durationMs = System.currentTimeMillis() - started,
+        foregroundPackage = result.foregroundPackage,
+        uiFingerprint = result.uiFingerprint,
+    )
 
     private suspend fun deliverPopup(request: BridgeRequest) {
         val popup = BridgePopupMessage(
