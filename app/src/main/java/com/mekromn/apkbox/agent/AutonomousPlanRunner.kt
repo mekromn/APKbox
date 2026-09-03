@@ -1,7 +1,7 @@
 package com.mekromn.apkbox.agent
 
 import android.content.Context
-import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.bridge.BridgeCommandType
 import com.mekromn.apkbox.bridge.BridgeExecutor
 import com.mekromn.apkbox.bridge.BridgePolicy
@@ -20,17 +20,17 @@ import kotlinx.coroutines.sync.withLock
  */
 class AutonomousPlanRunner(
     context: Context,
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
     private val executor: BridgeExecutor,
 ) {
     private val appContext = context.applicationContext
     private val store = AgentCheckpointStore(appContext)
-    private val screen = ScreenAgentController(appContext, adb)
-    private val observationCollector = AgentObservationCollector(adb, screen)
-    private val evidenceCollector = AgentEvidenceCollector(appContext, adb, screen, store)
+    private val screen = ScreenAgentController(appContext, privileged)
+    private val observationCollector = AgentObservationCollector(privileged, screen)
+    private val evidenceCollector = AgentEvidenceCollector(appContext, privileged, screen, store)
     private val watchdogStateStore = AgentWatchdogStateStore(appContext)
     private val watchdog = AgentWatchdog(observationCollector, evidenceCollector, store, watchdogStateStore)
-    private val recovery = AgentRecoveryExecutor(adb, screen)
+    private val recovery = AgentRecoveryExecutor(privileged, screen)
     private val actionLedger = AgentActionLedger(appContext)
     private val runMutex = Mutex()
 
