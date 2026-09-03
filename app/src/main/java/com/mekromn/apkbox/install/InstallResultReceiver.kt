@@ -40,6 +40,12 @@ class InstallResultReceiver : BroadcastReceiver() {
 
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                InstallFlowRuntime.update(
+                    stage = InstallFlowStage.WAITING_PACKAGE_INSTALLER_CONFIRMATION,
+                    title = "Waiting for Android Package Installer",
+                    detail = "The exact verified APK is staged. Confirm Install in Android's Package Installer. APKbox is staying open underneath so cancellation/failure can be reported instead of disappearing.",
+                    packageName = packageName,
+                )
                 val confirmation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
                 } else {
@@ -47,11 +53,41 @@ class InstallResultReceiver : BroadcastReceiver() {
                     intent.getParcelableExtra(Intent.EXTRA_INTENT)
                 }
                 confirmation?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (confirmation != null) context.startActivity(confirmation)
+                if (confirmation == null) {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.FAILED,
+                        "Package Installer confirmation missing",
+                        "Android requested user confirmation but did not provide a confirmation Intent.",
+                        packageName = packageName,
+                    )
+                    notifyMessage(
+                        context,
+                        "Install could not continue",
+                        "Android did not provide the Package Installer confirmation screen.",
+                    )
+                } else {
+                    runCatching { context.startActivity(confirmation) }
+                        .onFailure { failure ->
+                            val detail = failure.message ?: failure.javaClass.simpleName
+                            InstallFlowRuntime.update(
+                                InstallFlowStage.FAILED,
+                                "Could not open Package Installer",
+                                detail,
+                                packageName = packageName,
+                            )
+                            notifyConfirmationRequired(context, label, confirmation, detail)
+                        }
+                }
             }
 
             PackageInstaller.STATUS_SUCCESS -> {
                 cleanupTerminalSession(context, sessionId)
+                InstallFlowRuntime.update(
+                    InstallFlowStage.INSTALLING,
+                    "Android installed the APK",
+                    "PackageInstaller reported success. APKbox is verifying any pending data-restore requirement before first launch.",
+                    packageName = packageName,
+                )
                 val coordinator = ReinstallCoordinator(
                     context,
                     ApkBoxServices.privilegedBridge(context.applicationContext),
@@ -76,7 +112,18 @@ class InstallResultReceiver : BroadcastReceiver() {
                 } else {
                     ""
                 }
-                notifyMessage(context, "Install failed", message + backupNote)
+                val cancelled = status == PackageInstaller.STATUS_FAILURE_ABORTED
+                InstallFlowRuntime.update(
+                    stage = if (cancelled) InstallFlowStage.CANCELLED else InstallFlowStage.FAILED,
+                    title = if (cancelled) "Install cancelled in Package Installer" else "Package Installer failed",
+                    detail = message + backupNote,
+                    packageName = packageName,
+                )
+                notifyMessage(
+                    context,
+                    if (cancelled) "Install cancelled" else "Install failed",
+                    message + backupNote,
+                )
             }
         }
     }
@@ -88,6 +135,12 @@ class InstallResultReceiver : BroadcastReceiver() {
         label: String,
         version: String,
     ) {
+        InstallFlowRuntime.update(
+            InstallFlowStage.RESTORING_DATA,
+            "Restoring preserved app data",
+            "The replacement APK is installed. APKbox is restoring the root/Sui backup before allowing the new signer to launch.",
+            packageName = packageName,
+        )
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
@@ -99,13 +152,25 @@ class InstallResultReceiver : BroadcastReceiver() {
                     )
                 }
                 if (outcome.restored) {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.COMPLETE,
+                        "$label installed · data restored",
+                        outcome.detail,
+                        packageName = packageName,
+                    )
                     notifyMessage(
                         context,
                         "$label installed · data restored",
                         outcome.detail,
                     )
-                    finishSuccessfulInstall(context, packageName, label, version)
+                    finishSuccessfulInstall(context, packageName, label, version, updateRuntime = false)
                 } else {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.COMPLETE_WITH_WARNING,
+                        "$label installed · data restore incomplete",
+                        outcome.detail + " APKbox did not launch the app; the saved backup was kept when possible.",
+                        packageName = packageName,
+                    )
                     // Do not auto-launch when restoration failed. Opening the replacement can create
                     // fresh state over files that the user still expects APKbox to recover.
                     notifyMessage(
@@ -120,7 +185,21 @@ class InstallResultReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun finishSuccessfulInstall(context: Context, packageName: String, label: String, version: String) {
+    private fun finishSuccessfulInstall(
+        context: Context,
+        packageName: String,
+        label: String,
+        version: String,
+        updateRuntime: Boolean = true,
+    ) {
+        if (updateRuntime) {
+            InstallFlowRuntime.update(
+                InstallFlowStage.COMPLETE,
+                "$label installed successfully",
+                if (version.isBlank()) "Android completed the verified install." else "Android completed the verified install of version $version.",
+                packageName = packageName,
+            )
+        }
         val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
         if (launchIntent != null) {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
@@ -138,6 +217,37 @@ class InstallResultReceiver : BroadcastReceiver() {
             runCatching { context.packageManager.packageInstaller.abandonSession(sessionId) }
         }
         runCatching { TempStorageManager.cleanupRoutine(context) }
+    }
+
+    private fun notifyConfirmationRequired(
+        context: Context,
+        label: String,
+        confirmation: Intent,
+        failureDetail: String,
+    ) {
+        ensureChannel(context)
+        if (!canNotify(context)) return
+        val pending = PendingIntent.getActivity(
+            context,
+            (label + "confirm").hashCode(),
+            confirmation,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_app_icon)
+            .setContentTitle("Confirm $label installation")
+            .setContentText("Tap to open Android Package Installer")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "APKbox staged and verified the APK, but Android did not open Package Installer automatically: $failureDetail. Tap here to continue."
+                )
+            )
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        ContextCompat.getSystemService(context, NotificationManager::class.java)
+            ?.notify((label + "confirmation").hashCode(), notification)
     }
 
     private fun notifyInstalled(context: Context, label: String, version: String, launchIntent: Intent) {
