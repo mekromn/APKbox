@@ -37,7 +37,7 @@ class RemoteBridgeService : Service() {
         private const val SERVICE_NOTIFICATION_ID = 73_001
         private const val APPROVAL_NOTIFICATION_ID = 73_002
         private const val HEARTBEAT_KEEPALIVE_MS = 6L * 60L * 60L * 1_000L
-        private const val ADB_RECONNECT_INTERVAL_MS = 15_000L
+        private const val TRANSPORT_RECHECK_INTERVAL_MS = 15_000L
 
         fun start(context: Context) {
             val intent = Intent(context, RemoteBridgeService::class.java).setAction(ACTION_START)
@@ -58,6 +58,7 @@ class RemoteBridgeService : Service() {
     private val prefs by lazy { ApkBoxServices.bridgePreferences(applicationContext) }
     private val stateStore by lazy { ApkBoxServices.bridgeStateStore(applicationContext) }
     private val adb by lazy { ApkBoxServices.adbBridge(applicationContext) }
+    private val privileged by lazy { ApkBoxServices.privilegedBridge(applicationContext) }
     private val relay by lazy { ApkBoxServices.relayClient() }
     private val executor by lazy { ApkBoxServices.bridgeExecutor(applicationContext) }
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
@@ -66,11 +67,12 @@ class RemoteBridgeService : Service() {
     @Volatile private var forcePoll = false
     private var lastHeartbeat = 0L
     private var lastHeartbeatFingerprint = ""
-    private var lastAdbReconnect = 0L
+    private var lastTransportRecheck = 0L
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
+        privileged.refreshStatus()
         startForeground(SERVICE_NOTIFICATION_ID, buildServiceNotification("Starting…"))
         BridgeRuntime.update { it.copy(running = true) }
     }
@@ -123,7 +125,7 @@ class RemoteBridgeService : Service() {
                 continue
             }
 
-            maybeReconnectAdb(config)
+            maybePreparePrivilegedTransport(config)
             val now = System.currentTimeMillis()
 
             runCatching { flushCompleted(config, token) }
@@ -145,6 +147,8 @@ class RemoteBridgeService : Service() {
                 heartbeatFingerprint != lastHeartbeatFingerprint ||
                 now - lastHeartbeat >= HEARTBEAT_KEEPALIVE_MS
             if (heartbeatDue) {
+                // Keep the existing ADB fields in Continuity for protocol compatibility; the local
+                // fingerprint/status now also tracks Shizuku/Sui and avoids unnecessary ADB healing.
                 runCatching { relay.heartbeat(config, token, adb.status.value) }
                     .onSuccess {
                         lastHeartbeat = now
@@ -333,22 +337,45 @@ class RemoteBridgeService : Service() {
         forcePoll = true
     }
 
-    private suspend fun maybeReconnectAdb(config: BridgeConfig) {
-        if (!config.paired) return
+    /**
+     * Shizuku/Sui is a peer transport, not an ADB convenience wrapper. If its UserService is ready,
+     * the bridge does no periodic ADB rediscovery at all. This keeps the service useful off Wi-Fi and
+     * avoids radio/mDNS work that cannot improve command execution. Only when Shizuku/Sui is absent
+     * do we maintain the paired Wireless ADB fallback.
+     */
+    private suspend fun maybePreparePrivilegedTransport(config: BridgeConfig) {
         val now = System.currentTimeMillis()
-        if (now - lastAdbReconnect < ADB_RECONNECT_INTERVAL_MS) return
-        lastAdbReconnect = now
-        // Background healing must honor the transport's backoff and USER_ACTION_REQUIRED state.
-        // Only an explicit user reconnect operation is allowed to force rediscovery.
-        runCatching { adb.autoHeal(force = false) }
+        if (now - lastTransportRecheck < TRANSPORT_RECHECK_INTERVAL_MS) return
+        lastTransportRecheck = now
+
+        privileged.shizuku.refreshStatus()
+        if (runCatching { privileged.shizuku.ensureReady() }.getOrDefault(false)) return
+        if (!config.paired) return
+
+        if (privileged.hasPersistentWirelessControl()) {
+            runCatching { privileged.tryStartWirelessDebugging() }
+        } else {
+            // Background healing must honor ADB backoff and USER_ACTION_REQUIRED. Only an explicit
+            // user reconnect operation is allowed to force rediscovery/pairing attention.
+            runCatching { adb.autoHeal(force = false) }
+        }
     }
 
     private fun heartbeatFingerprint(config: BridgeConfig): String = buildString {
-        val adbState = adb.status.value
+        val status = privileged.status.value
+        val adbState = status.adb
+        val shizuku = status.shizuku
         append(config.enabled).append('|')
         append(config.deviceId).append('|')
         append(config.repoOwner).append('/').append(config.repoName).append('|')
         append(config.paired).append('|')
+        append(status.activeTransport.name).append('|')
+        append(status.persistentWirelessControl).append('|')
+        append(shizuku.binderAvailable).append('|')
+        append(shizuku.permissionGranted).append('|')
+        append(shizuku.serviceReady).append('|')
+        append(shizuku.mode.name).append('|')
+        append(shizuku.uid).append('|')
         append(adbState.connected).append('|')
         append(adbState.healPhase.name).append('|')
         append(adbState.consecutiveFailures).append('|')
@@ -421,21 +448,23 @@ class RemoteBridgeService : Service() {
     }
 
     private fun statusLine(): String {
-        val adbState = adb.status.value
-        val adbText = when (adbState.healPhase) {
-            AdbHealPhase.HEALTHY -> "ADB healthy"
-            AdbHealPhase.VERIFYING -> "ADB verifying"
-            AdbHealPhase.REDISCOVERING -> "ADB rediscovering"
-            AdbHealPhase.WAITING_FOR_WIFI -> "ADB waiting for Wi-Fi"
-            AdbHealPhase.BACKOFF -> "ADB retry backoff"
-            AdbHealPhase.USER_ACTION_REQUIRED -> "ADB needs attention"
-            AdbHealPhase.DISCONNECTED -> "ADB disconnected"
+        val status = privileged.status.value
+        val transportText = when {
+            status.shizuku.usable && status.shizuku.root -> "Sui/root ready"
+            status.shizuku.usable -> "Shizuku ready"
+            status.adb.healPhase == AdbHealPhase.HEALTHY -> "Wireless ADB healthy"
+            status.adb.healPhase == AdbHealPhase.VERIFYING -> "Wireless ADB verifying"
+            status.adb.healPhase == AdbHealPhase.REDISCOVERING -> "Wireless ADB rediscovering"
+            status.adb.healPhase == AdbHealPhase.WAITING_FOR_WIFI -> "No privileged transport · ADB waiting for Wi-Fi"
+            status.adb.healPhase == AdbHealPhase.BACKOFF -> "No privileged transport · ADB retry backoff"
+            status.adb.healPhase == AdbHealPhase.USER_ACTION_REQUIRED -> "No privileged transport · ADB needs attention"
+            else -> "No privileged transport"
         }
         val runtime = BridgeRuntime.status.value
         val relayText = if (runtime.relayReachable) "Continuity online" else "Continuity retrying"
         val trust = prefs.state.value.trustedUntilEpochMs
         val trustText = if (trust > System.currentTimeMillis()) " · trusted session" else ""
-        return "$adbText · $relayText$trustText"
+        return "$transportText · $relayText$trustText"
     }
 
     private fun updateForeground(text: String) {
