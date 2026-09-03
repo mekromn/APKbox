@@ -1,0 +1,119 @@
+package com.mekromn.apkbox.bridge
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Live bridge contract published in every Continuity state.json heartbeat.
+ *
+ * Agents must prefer this catalog over remembered capabilities. It intentionally separates
+ * remotely invokable commands from device-local features so a future agent never invents a remote
+ * verb merely because APKbox has a local UI for the same capability.
+ */
+object BridgeCapabilityCatalog {
+    const val PROTOCOL_VERSION = 3
+    const val CAPABILITY_SCHEMA = 2
+    const val SKILL_REVISION = "2026-09-03.1"
+    const val SKILL_REPOSITORY = "mekromn/Continuity"
+    const val SKILL_PATH = "skills/apkbox-remote-bridge/SKILL.md"
+    const val PROTOCOL_PATH = "bridge/README.md"
+
+    fun enrich(
+        state: JSONObject,
+        config: BridgeConfig,
+        privileged: PrivilegedBridgeStatus,
+    ): JSONObject {
+        val shizuku = privileged.shizuku
+        val adb = privileged.adb
+
+        return state
+            .put("bridgeProtocolVersion", PROTOCOL_VERSION)
+            .put("capabilitySchema", CAPABILITY_SCHEMA)
+            .put("skillRevision", SKILL_REVISION)
+            .put("operatorSkill", JSONObject()
+                .put("repository", SKILL_REPOSITORY)
+                .put("path", SKILL_PATH)
+                .put("protocolPath", PROTOCOL_PATH)
+                .put("rule", "Read the live state first, then read this skill before issuing bridge requests."))
+            .put("privilegedTransport", JSONObject()
+                .put("ready", privileged.ready)
+                .put("active", privileged.activeLabel)
+                .put("activeKind", privileged.activeTransport.name)
+                .put("persistentWirelessControl", privileged.persistentWirelessControl)
+                .put("shizukuBinderAvailable", shizuku.binderAvailable)
+                .put("shizukuPermissionGranted", shizuku.permissionGranted)
+                .put("shizukuServiceReady", shizuku.serviceReady)
+                .put("shizukuMode", shizuku.mode.name)
+                .put("shizukuUid", shizuku.uid)
+                .put("wirelessAdbPaired", config.paired)
+                .put("wirelessAdbConnected", adb.connected)
+                .put("wirelessAdbHealPhase", adb.healPhase.name)
+                .put("wirelessAdbWifiAvailable", adb.wifiAvailable)
+                .put("wirelessAdbUserActionRequired", adb.userActionRequired))
+            .put("remoteCommandTypes", JSONArray().apply {
+                BridgeCommandType.values().forEach { put(it.name) }
+            })
+            .put("uiSelectors", JSONObject()
+                .put("formats", JSONArray(listOf(
+                    "id:<resource-id>",
+                    "text:<exact text>",
+                    "desc:<exact content-description>",
+                    "contains:<substring>",
+                    "<bare exact text/id/description>"
+                )))
+                .put("rule", "Prefer semantic selectors. Coordinate actions are package-foreground guarded."))
+            .put("advancedWorkflows", JSONObject()
+                .put("autonomousPlan", JSONObject()
+                    .put("commands", JSONArray(listOf("AGENT_START", "AGENT_RESUME", "AGENT_STATUS")))
+                    .put("planPath", "bridge/devices/<device-id>/plans/<runId>.json")
+                    .put("checkpointPath", "bridge/devices/<device-id>/runs/<runId>/checkpoint.json")
+                    .put("actions", JSONArray(listOf(
+                        "LAUNCH", "TAP", "FIND_TAP", "SWIPE", "TEXT", "KEY", "WAIT",
+                        "SNAPSHOT", "SCREENSHOT", "SLEEP", "CHECKPOINT"
+                    )))
+                    .put("freshApprovalForStartOrResume", true))
+                .put("buildRunner", JSONObject()
+                    .put("commands", JSONArray(listOf("BUILD_START", "BUILD_STATUS")))
+                    .put("candidatePath", "bridge/devices/<device-id>/builds/<buildId>.json")
+                    .put("checkpointPath", "bridge/devices/<device-id>/build-runs/<runId>/checkpoint.json")
+                    .put("canChainPlanRunId", true)
+                    .put("freshApprovalForStart", true)))
+            .put("deviceCapabilities", JSONArray(listOf(
+                "privileged_shell_shizuku_sui_or_wireless_adb",
+                "wireless_adb_auto_heal",
+                "wireless_adb_persistent_self_start",
+                "wireless_adb_pairing_assistant",
+                "ui_automation_package_guarded",
+                "relay_screenshot_preview",
+                "autonomous_plan_runner",
+                "oracle_watchdog_and_evidence",
+                "build_download_verify_archive_install_launch",
+                "unattended_verified_apk_install",
+                "installed_base_apk_sha256_verification",
+                "local_signature_conflict_reinstall"
+            )))
+            .put("limits", JSONObject()
+                .put("requestTimeoutSecondsMax", 120)
+                .put("planStepsMin", 1)
+                .put("planStepsMax", 500)
+                .put("planRuntimeSecondsMin", 10)
+                .put("planRuntimeSecondsMax", 7200)
+                .put("planRetriesPerStepMax", 10)
+                .put("uiCoordinateMax", 20000)
+                .put("uiTextCharsMax", 2000)
+                .put("requestIdCharsMax", 96))
+            .put("securityContract", JSONObject()
+                .put("deviceComputesRisk", true)
+                .put("relayCannotLowerRisk", true)
+                .put("mutatingAlwaysNeedsFreshApproval", true)
+                .put("dangerousAlwaysNeedsFreshApproval", true)
+                .put("advancedStartResumeNeedsFreshApproval", true)
+                .put("trustedSessionNeverGrantsBlanketShell", true)
+                .put("atMostOnceJournal", true))
+            .put("knownLimitations", JSONArray(listOf(
+                "Relay SCREENSHOT is currently a scaled JPEG preview, not an exact forensic capture.",
+                "Wireless ADB still requires Android Wi-Fi/trusted-network policy when Shizuku/Sui is unavailable.",
+                "Local signature-conflict reinstall is not exposed as a remote bridge command."
+            )))
+    }
+}
