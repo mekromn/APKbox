@@ -96,12 +96,15 @@ class PrivilegedBridgeManager(
     suspend fun ensureReady(): Boolean = selectTransport() != PrivilegedTransportKind.NONE
 
     suspend fun execute(command: String, timeoutSeconds: Int = 20): BridgeShellResult {
-        return when (val transport = selectTransport()) {
+        val transport = selectTransport()
+        val result = when (transport) {
             PrivilegedTransportKind.SHIZUKU_ROOT,
             PrivilegedTransportKind.SHIZUKU_SHELL -> shizuku.execute(command, timeoutSeconds)
             PrivilegedTransportKind.WIRELESS_ADB -> adb.execute(command, timeoutSeconds)
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
-        }.also { markSelected(transport) }
+        }
+        markSelected(transport)
+        return result
     }
 
     suspend fun executeRaw(
@@ -109,12 +112,15 @@ class PrivilegedBridgeManager(
         timeoutSeconds: Int = 20,
         maxBytes: Int = 16 * 1024 * 1024,
     ): BridgeRawResult {
-        return when (val transport = selectTransport()) {
+        val transport = selectTransport()
+        val result = when (transport) {
             PrivilegedTransportKind.SHIZUKU_ROOT,
             PrivilegedTransportKind.SHIZUKU_SHELL -> shizuku.executeRaw(command, timeoutSeconds, maxBytes)
             PrivilegedTransportKind.WIRELESS_ADB -> adb.executeRaw(command, timeoutSeconds, maxBytes)
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
-        }.also { markSelected(transport) }
+        }
+        markSelected(transport)
+        return result
     }
 
     suspend fun installVerifiedStream(
