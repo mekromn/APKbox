@@ -47,6 +47,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
     }
 
     packaging {
@@ -80,6 +81,12 @@ dependencies {
     // independent of hidden Android crypto APIs.
     implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
     implementation("org.conscrypt:conscrypt-android:2.5.3")
+
+    // Shizuku and Sui are first-class privileged transports alongside Wireless ADB. APKbox uses a
+    // UserService rather than deprecated Shizuku.newProcess so shell/root execution can support
+    // streaming raw captures and verified package-install sessions without Binder-size limits.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
