@@ -1,6 +1,6 @@
 package com.mekromn.apkbox.agent
 
-import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.bridge.ScreenAgentController
 import kotlinx.coroutines.delay
 
@@ -26,7 +26,7 @@ data class RecoveryResult(
  * operations with their own policy and audit trail.
  */
 class AgentRecoveryExecutor(
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
     private val screen: ScreenAgentController,
 ) {
     suspend fun recover(
@@ -43,7 +43,9 @@ class AgentRecoveryExecutor(
         }
 
         return when (decision.signal) {
-            OracleSignal.ADB_DISCONNECTED -> reconnectAdb(checkpoint)
+            // The legacy oracle name ADB_DISCONNECTED now means no privileged shell transport was
+            // available. Shizuku/Sui recovery is attempted before Wireless ADB.
+            OracleSignal.ADB_DISCONNECTED -> reconnectPrivileged(checkpoint)
             OracleSignal.UI_FROZEN,
             OracleSignal.BLACK_OR_BLANK_SCREEN,
             OracleSignal.DEADLINE_EXCEEDED -> softRelaunch(checkpoint)
@@ -63,16 +65,17 @@ class AgentRecoveryExecutor(
         }
     }
 
-    private suspend fun reconnectAdb(checkpoint: AgentCheckpoint): RecoveryResult {
+    private suspend fun reconnectPrivileged(checkpoint: AgentCheckpoint): RecoveryResult {
         repeat(2) { attempt ->
-            val connected = runCatching { adb.autoConnect(timeoutMs = 7_000L) }.getOrDefault(false) || adb.status.value.connected
-            if (connected) {
+            val ready = runCatching { privileged.ensureReady() }.getOrDefault(false) ||
+                runCatching { privileged.tryStartWirelessDebugging() }.getOrDefault(false)
+            if (ready) {
                 val foreground = runCatching { screen.foregroundPackage() }.getOrDefault("")
                 return RecoveryResult(
                     action = RecoveryAction.RECONNECT_ADB,
                     attempted = true,
                     recovered = true,
-                    detail = "Wireless ADB reconnected on attempt ${attempt + 1}.",
+                    detail = "Privileged transport recovered on attempt ${attempt + 1} via ${privileged.activeTransportLabel()}.",
                     foregroundPackage = foreground,
                 )
             }
@@ -82,30 +85,30 @@ class AgentRecoveryExecutor(
             action = RecoveryAction.RECONNECT_ADB,
             attempted = true,
             recovered = false,
-            detail = "Wireless ADB did not reconnect within the bounded retry budget for run ${checkpoint.runId}.",
+            detail = "Neither Shizuku/Sui nor Wireless ADB became usable within the bounded retry budget for run ${checkpoint.runId}.",
         )
     }
 
     private suspend fun softRelaunch(checkpoint: AgentCheckpoint): RecoveryResult {
         val pkg = safePackage(checkpoint.targetPackage)
-        if (!adb.status.value.connected && !runCatching { adb.ensureConnected() }.getOrDefault(false)) {
+        if (!runCatching { privileged.ensureReady() }.getOrDefault(false)) {
             return RecoveryResult(
                 action = RecoveryAction.SOFT_RELAUNCH_TARGET,
                 attempted = false,
                 recovered = false,
-                detail = "Cannot soft-relaunch $pkg because Wireless ADB is disconnected.",
+                detail = "Cannot soft-relaunch $pkg because no privileged transport is ready.",
             )
         }
 
         // `monkey -p ... 1` is the same structured launch mechanism used by Bridge LAUNCH. It does
         // not force-stop or clear the target and therefore cannot silently destroy the failing state.
-        val launch = adb.execute("monkey -p $pkg -c android.intent.category.LAUNCHER 1", 12)
+        val launch = privileged.execute("monkey -p $pkg -c android.intent.category.LAUNCHER 1", 12)
         if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
             return RecoveryResult(
                 action = RecoveryAction.SOFT_RELAUNCH_TARGET,
                 attempted = true,
                 recovered = false,
-                detail = "Soft relaunch failed${launch.exitCode?.let { " with exit code $it" }.orEmpty()}.",
+                detail = "Soft relaunch failed through ${privileged.activeTransportLabel()}${launch.exitCode?.let { " with exit code $it" }.orEmpty()}.",
             )
         }
 
@@ -119,7 +122,7 @@ class AgentRecoveryExecutor(
                     action = RecoveryAction.SOFT_RELAUNCH_TARGET,
                     attempted = true,
                     recovered = true,
-                    detail = "Soft relaunch returned $pkg to the foreground for re-observation.",
+                    detail = "Soft relaunch through ${privileged.activeTransportLabel()} returned $pkg to the foreground for re-observation.",
                     foregroundPackage = foreground,
                     uiFingerprint = snapshot?.uiFingerprint.orEmpty(),
                 )
