@@ -56,9 +56,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +85,7 @@ import java.util.Date
 class BridgeActivity : ComponentActivity() {
     private val prefs by lazy { ApkBoxServices.bridgePreferences(applicationContext) }
     private val adb by lazy { ApkBoxServices.adbBridge(applicationContext) }
+    private val privileged by lazy { ApkBoxServices.privilegedBridge(applicationContext) }
     private val relay by lazy { ApkBoxServices.relayClient() }
     private val stateStore by lazy { ApkBoxServices.bridgeStateStore(applicationContext) }
 
@@ -113,6 +114,7 @@ class BridgeActivity : ComponentActivity() {
             APKboxTheme {
                 val config = prefs.state.collectAsStateWithLifecycle().value
                 val adbStatus = adb.status.collectAsStateWithLifecycle().value
+                val privilegedStatus = privileged.status.collectAsStateWithLifecycle().value
                 val runtime = BridgeRuntime.status.collectAsStateWithLifecycle().value
                 val events = stateStore.events.collectAsStateWithLifecycle().value
                 val isBusy = busy.collectAsStateWithLifecycle().value
@@ -122,6 +124,7 @@ class BridgeActivity : ComponentActivity() {
                 BridgeScreen(
                     config = config,
                     adbStatus = adbStatus,
+                    privilegedStatus = privilegedStatus,
                     runtime = runtime,
                     events = events,
                     busy = isBusy,
@@ -129,6 +132,8 @@ class BridgeActivity : ComponentActivity() {
                     consoleOutput = output,
                     onBack = { finish() },
                     onEnabled = ::setBridgeEnabled,
+                    onGrantShizuku = ::grantShizuku,
+                    onBootstrapWireless = ::bootstrapPersistentWireless,
                     onAutoPair = ::startAutoPair,
                     onPair = ::pairAdb,
                     onConnect = ::connectAdb,
@@ -181,6 +186,26 @@ class BridgeActivity : ComponentActivity() {
         message.value = "Remote Bridge enabled. Approval prompts will stay visible in notifications."
     }
 
+    private fun grantShizuku() {
+        val status = privileged.shizuku.status.value
+        message.value = when {
+            status.usable -> "${privileged.activeTransportLabel()} is already ready."
+            !status.binderAvailable -> "Start Shizuku, or enable Sui on a rooted device, then return to APKbox."
+            privileged.requestShizukuPermission() -> "Approve APKbox in the Shizuku permission prompt. Once granted, Shizuku/Sui becomes the preferred privileged transport automatically."
+            else -> privileged.shizuku.status.value.lastError.ifBlank { "APKbox could not request Shizuku access." }
+        }
+    }
+
+    private fun bootstrapPersistentWireless() {
+        runBusy {
+            if (privileged.bootstrapPersistentWirelessControl()) {
+                "Persistent Wireless Debugging self-start enabled. APKbox can now toggle Android's Wireless Debugging setting locally and reconnect its existing paired identity when Wi-Fi/trust policy allows."
+            } else {
+                "APKbox could not grant persistent Wireless Debugging control. Start/authorize Shizuku/Sui or connect Wireless ADB first, then try again."
+            }
+        }
+    }
+
     private fun startAutoPair() {
         val alreadyEnabled = PairingAssistantService.request(this)
         message.value = if (alreadyEnabled) {
@@ -201,8 +226,12 @@ class BridgeActivity : ComponentActivity() {
             if (paired) {
                 prefs.setPaired(true)
                 val connected = adb.autoConnect()
-                if (connected) "Paired and connected to this phone's Wireless ADB."
-                else "Pairing succeeded. Tap Auto connect after returning to the main Wireless debugging screen."
+                if (connected) {
+                    runCatching { privileged.bootstrapPersistentWirelessControl() }
+                    "Paired and connected to this phone's Wireless ADB. APKbox also attempted to enable persistent Wireless Debugging self-start for future reconnects."
+                } else {
+                    "Pairing succeeded. Tap Auto connect after returning to the main Wireless debugging screen."
+                }
             } else {
                 "Pairing was not accepted. Check the six-digit code and pairing port."
             }
@@ -211,7 +240,12 @@ class BridgeActivity : ComponentActivity() {
 
     private fun connectAdb() {
         runBusy {
-            if (adb.autoConnect()) "Wireless ADB connected." else "Wireless ADB was not discovered."
+            if (adb.autoConnect()) {
+                runCatching { privileged.bootstrapPersistentWirelessControl() }
+                "Wireless ADB connected."
+            } else {
+                "Wireless ADB was not discovered."
+            }
         }
     }
 
@@ -232,7 +266,7 @@ class BridgeActivity : ComponentActivity() {
             val token = prefs.relayToken()
             val result = relay.test(prefs.state.value, token)
             relay.heartbeat(prefs.state.value, token, adb.status.value)
-            "$result · device registered as ${prefs.state.value.deviceId}"
+            "$result · device registered as ${prefs.state.value.deviceId} · ${privileged.activeTransportLabel()}"
         }
     }
 
@@ -242,14 +276,15 @@ class BridgeActivity : ComponentActivity() {
         consoleOutput.value = "Running…"
         lifecycleScope.launch {
             try {
-                val result = adb.execute(command, 30)
+                val result = privileged.execute(command, 30)
                 consoleOutput.value = buildString {
                     append(result.output)
                     append("\n\n[exit=")
                     append(result.exitCode ?: "?")
                     append(" · ")
                     append(result.durationMs)
-                    append(" ms")
+                    append(" ms · ")
+                    append(privileged.activeTransportLabel())
                     if (result.truncated) append(" · output truncated")
                     append(']')
                 }
@@ -292,6 +327,7 @@ class BridgeActivity : ComponentActivity() {
 private fun BridgeScreen(
     config: BridgeConfig,
     adbStatus: AdbBridgeStatus,
+    privilegedStatus: PrivilegedBridgeStatus,
     runtime: BridgeRuntimeStatus,
     events: List<BridgeEvent>,
     busy: Boolean,
@@ -299,6 +335,8 @@ private fun BridgeScreen(
     consoleOutput: String,
     onBack: () -> Unit,
     onEnabled: (Boolean) -> Unit,
+    onGrantShizuku: () -> Unit,
+    onBootstrapWireless: () -> Unit,
     onAutoPair: () -> Unit,
     onPair: (String, String) -> Unit,
     onConnect: () -> Unit,
@@ -331,7 +369,7 @@ private fun BridgeScreen(
                         Column {
                             Text("Remote Debug Bridge", fontWeight = FontWeight.Bold)
                             Text(
-                                "ChatGPT ↔ Continuity ↔ APKbox ↔ Wireless ADB",
+                                "ChatGPT ↔ Continuity ↔ APKbox ↔ Shizuku/Sui or Wireless ADB",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -355,7 +393,7 @@ private fun BridgeScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            StatusHero(config, adbStatus, runtime, onEnabled, onPollNow)
+            StatusHero(config, privilegedStatus, runtime, onEnabled, onPollNow)
 
             if (message.isNotBlank()) {
                 Surface(
@@ -367,9 +405,57 @@ private fun BridgeScreen(
                 }
             }
 
-            BridgeCard(Icons.Rounded.Link, "1 · Pair this phone's Wireless ADB") {
+            BridgeCard(Icons.Rounded.Bolt, "1 · Privileged transport") {
                 Text(
-                    "APKbox can bootstrap Wireless ADB itself. Auto-open & pair navigates Pixel Developer options, opens the pairing-code dialog, reads the temporary six-digit code only from Android Settings, discovers the pairing port through Android's local ADB mDNS advertisement, pairs, and then disables its one-shot Accessibility helper.",
+                    "APKbox treats Shizuku/Sui and Wireless ADB as peer backends. When Shizuku or Sui is already authorized it is preferred automatically, so Screen Agent, Build Runner, unattended installs, evidence collection, recovery, and this console do not require Wi-Fi.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Active: ${privilegedStatus.activeLabel}",
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (privilegedStatus.ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                )
+                val shizuku = privilegedStatus.shizuku
+                Text(
+                    when {
+                        shizuku.usable && shizuku.root -> "Sui/root UserService ready · UID ${shizuku.uid}"
+                        shizuku.usable -> "Shizuku UserService ready · shell UID ${shizuku.uid}"
+                        shizuku.binderAvailable && !shizuku.permissionGranted -> "Shizuku is running · APKbox permission required"
+                        else -> "Shizuku/Sui not currently available"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!shizuku.usable) {
+                    OutlinedButton(onClick = onGrantShizuku, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (shizuku.binderAvailable) "Grant Shizuku access" else "Check Shizuku / Sui")
+                    }
+                }
+                HorizontalDivider()
+                Text(
+                    if (privilegedStatus.persistentWirelessControl) {
+                        "Persistent Wireless Debugging self-start: enabled"
+                    } else {
+                        "Persistent Wireless Debugging self-start: not bootstrapped"
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "Once bootstrapped through an authorized Shizuku/Sui or ADB session, APKbox can toggle Android's Wireless Debugging setting locally and reconnect its existing pairing without requiring that privileged transport to already be alive. Android's Wi-Fi/trusted-network rules still apply.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!privilegedStatus.persistentWirelessControl) {
+                    OutlinedButton(onClick = onBootstrapWireless, enabled = !busy && privilegedStatus.ready, modifier = Modifier.fillMaxWidth()) {
+                        Text("Enable persistent Wireless Debugging self-start")
+                    }
+                }
+            }
+
+            BridgeCard(Icons.Rounded.Link, "2 · Pair this phone's Wireless ADB") {
+                Text(
+                    "Wireless ADB is the peer fallback when Shizuku/Sui is unavailable. APKbox can bootstrap pairing itself: Auto-open & pair navigates Pixel Developer options, opens the pairing-code dialog, reads the temporary six-digit code only from Android Settings, discovers the pairing port through Android's local ADB mDNS advertisement, pairs, and then disables its one-shot Accessibility helper.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -424,9 +510,14 @@ private fun BridgeScreen(
                         modifier = Modifier.weight(1f),
                     ) { Text("Auto connect") }
                 }
+                Text(
+                    "ADB status: ${if (adbStatus.connected) "connected" else adbStatus.healPhase.name.lowercase().replace('_', ' ')}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
-            BridgeCard(Icons.Rounded.Cloud, "2 · Private Continuity relay") {
+            BridgeCard(Icons.Rounded.Cloud, "3 · Private Continuity relay") {
                 DeviceIdRow(config.deviceId)
                 OutlinedTextField(
                     value = owner,
@@ -481,7 +572,7 @@ private fun BridgeScreen(
                 }
             }
 
-            BridgeCard(Icons.Rounded.Security, "3 · Approval policy") {
+            BridgeCard(Icons.Rounded.Security, "4 · Approval policy") {
                 ToggleRow(
                     "Informational messages",
                     "Allow ChatGPT notifications and toasts without shell approval.",
@@ -490,7 +581,7 @@ private fun BridgeScreen(
                 )
                 ToggleRow(
                     "Instruction popups",
-                    "Allow informational ChatGPT requests to bring an APKbox instruction popup to the front when ADB is connected.",
+                    "Allow informational ChatGPT requests to bring an APKbox instruction popup to the front when a privileged transport is ready.",
                     config.allowPopups,
                     onAllowPopups,
                 )
@@ -506,7 +597,7 @@ private fun BridgeScreen(
                     color = if (trusted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    "A trusted session auto-approves structured logcats/dumpsys/app launches and the strict read-only shell allowlist. Mutating, composed, unknown, and arbitrary shell commands still require a fresh approval every time.",
+                    "A trusted session auto-approves structured logcats/dumpsys/app launches and the strict read-only shell allowlist. Mutating, composed, unknown, and arbitrary shell commands still require a fresh approval every time regardless of whether Shizuku/Sui or ADB executes them.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -522,9 +613,9 @@ private fun BridgeScreen(
                 }
             }
 
-            BridgeCard(Icons.Rounded.Terminal, "Local ADB console") {
+            BridgeCard(Icons.Rounded.Terminal, "Local privileged console") {
                 Text(
-                    "Commands you run here are explicitly initiated on the phone and do not need remote approval.",
+                    "Commands you run here are explicitly initiated on the phone and do not need remote approval. APKbox selects Shizuku/Sui first when ready, otherwise Wireless ADB.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -541,7 +632,7 @@ private fun BridgeScreen(
                     value = localCommand,
                     onValueChange = { localCommand = it.take(16_384) },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("ADB shell command") },
+                    label = { Text("Privileged shell command") },
                     minLines = 2,
                     maxLines = 5,
                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -553,7 +644,7 @@ private fun BridgeScreen(
                 ) {
                     Icon(Icons.Rounded.PlayArrow, null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Run through local Wireless ADB")
+                    Text("Run through ${privilegedStatus.activeLabel}")
                 }
                 if (consoleOutput.isNotBlank()) {
                     Surface(
@@ -602,7 +693,7 @@ private fun BridgeScreen(
 @Composable
 private fun StatusHero(
     config: BridgeConfig,
-    adbStatus: AdbBridgeStatus,
+    privilegedStatus: PrivilegedBridgeStatus,
     runtime: BridgeRuntimeStatus,
     onEnabled: (Boolean) -> Unit,
     onPollNow: () -> Unit,
@@ -618,7 +709,7 @@ private fun StatusHero(
                 Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
                     Text("ChatGPT Remote Debug Bridge", fontWeight = FontWeight.Bold)
                     Text(
-                        if (config.enabled) "Foreground relay active when configured" else "Off until you enable it",
+                        if (config.enabled) "Foreground relay active · ${privilegedStatus.activeLabel}" else "Off until you enable it",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -626,7 +717,8 @@ private fun StatusHero(
                 Switch(checked = config.enabled, onCheckedChange = onEnabled)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                StatusChip("ADB", adbStatus.connected)
+                StatusChip("Shizuku", privilegedStatus.shizuku.usable)
+                StatusChip("ADB", privilegedStatus.adb.connected)
                 StatusChip("Continuity", runtime.relayReachable)
                 StatusChip("Trusted", config.trustedUntilEpochMs > System.currentTimeMillis())
                 if (runtime.pendingRequestId.isNotBlank()) StatusChip("Approval", true)
