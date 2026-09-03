@@ -130,9 +130,6 @@ class RemoteBridgeService : Service() {
             maybePreparePrivilegedTransport(config)
             val now = System.currentTimeMillis()
 
-            // Any persisted in-flight entry not owned by a currently executing coroutine is from an
-            // interrupted process/service lifetime. Never replay it automatically: close it with a
-            // deterministic result, and let advanced workflows recover through their checkpoints.
             reconcileInterruptedInFlight()
 
             runCatching { flushCompleted(config, token) }
@@ -236,14 +233,11 @@ class RemoteBridgeService : Service() {
         val pending = BridgePendingRequest(item.request, risk, item.path, item.sha)
         beginInFlight(pending)
         val result = executor.execute(item.request, risk)
-        journalResult(item, result)
-        finishInFlight(item.request.id)
+        journalReservedResult(item, result)
     }
 
     private fun beginInFlight(pending: BridgePendingRequest) {
         synchronized(activeRequestIds) {
-            // File first, memory second. If the process dies between these operations the next
-            // process sees a durable ambiguous execution and refuses to replay it.
             stateStore.saveInFlight(pending)
             activeRequestIds.add(pending.request.id)
         }
@@ -251,9 +245,25 @@ class RemoteBridgeService : Service() {
 
     private fun finishInFlight(requestId: String) {
         synchronized(activeRequestIds) {
-            // A final result must already be journaled before this is called.
             stateStore.clearInFlight(requestId)
             activeRequestIds.remove(requestId)
+        }
+    }
+
+    /**
+     * Result journal is the commit point. If it fails, leave the durable in-flight reservation but
+     * release the in-memory owner so the main loop can reconcile the ambiguous operation instead of
+     * hanging forever or replaying it.
+     */
+    private fun journalReservedResult(item: RelayInboxItem, result: BridgeResult) {
+        try {
+            journalResult(item, result)
+        } finally {
+            if (stateStore.hasCompleted(item.request.id)) {
+                finishInFlight(item.request.id)
+            } else {
+                synchronized(activeRequestIds) { activeRequestIds.remove(item.request.id) }
+            }
         }
     }
 
@@ -345,8 +355,6 @@ class RemoteBridgeService : Service() {
                 localArtifactPath = path
             }
 
-            // The local completion journal survives until artifact delivery (if any), result write,
-            // and inbox deletion have all succeeded. A retry uploads the exact same bytes.
             relay.writeResult(config, token, deliverable)
             relay.deleteInbox(
                 config = config,
@@ -390,13 +398,16 @@ class RemoteBridgeService : Service() {
                     prefs.setTrustedUntil(System.currentTimeMillis() + 10 * 60_000L)
                 }
                 beginInFlight(pending)
-                // Clear approval only after the durable in-flight reservation exists.
                 stateStore.clearPending()
                 executor.execute(pending.request, pending.risk)
             }
         }
-        journalResult(item, result)
-        if (allow && !pending.request.isExpired()) finishInFlight(pending.request.id)
+
+        if (stateStore.hasInFlight(pending.request.id)) {
+            journalReservedResult(item, result)
+        } else {
+            journalResult(item, result)
+        }
 
         val config = prefs.state.value
         val token = prefs.relayToken()
@@ -406,12 +417,6 @@ class RemoteBridgeService : Service() {
         forcePoll = true
     }
 
-    /**
-     * Shizuku/Sui is a peer transport, not an ADB convenience wrapper. If its UserService is ready,
-     * the bridge does no periodic ADB rediscovery at all. This keeps the service useful off Wi-Fi and
-     * avoids radio/mDNS work that cannot improve command execution. Only when Shizuku/Sui is absent
-     * do we maintain the paired Wireless ADB fallback.
-     */
     private suspend fun maybePreparePrivilegedTransport(config: BridgeConfig) {
         val now = System.currentTimeMillis()
         if (now - lastTransportRecheck < TRANSPORT_RECHECK_INTERVAL_MS) return
@@ -424,8 +429,6 @@ class RemoteBridgeService : Service() {
         if (privileged.hasPersistentWirelessControl()) {
             runCatching { privileged.tryStartWirelessDebugging() }
         } else {
-            // Background healing must honor ADB backoff and USER_ACTION_REQUIRED. Only an explicit
-            // user reconnect operation is allowed to force rediscovery/pairing attention.
             runCatching { adb.autoHeal(force = false) }
         }
     }
