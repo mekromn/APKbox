@@ -117,6 +117,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
     private var installWaitingForPermission: ApkRecord? = null
     private var permissionResumeAction = PermissionResumeAction.NORMAL_INSTALL
     private var installWaitingForRemoval: ApkRecord? = null
+    private var forcedInstallMode: OpenInstallMode? = null
 
     private val uninstallLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -136,6 +137,12 @@ class OpenApkInstallerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         sourceUri = intent?.data
+        forcedInstallMode = when (intent?.getStringExtra(EXTRA_OPEN_APK_INSTALL_MODE)) {
+            OPEN_APK_INSTALL_MODE_NORMAL -> OpenInstallMode.NORMAL
+            OPEN_APK_INSTALL_MODE_UNATTENDED -> OpenInstallMode.UNATTENDED
+            OPEN_APK_INSTALL_MODE_REINSTALL -> OpenInstallMode.REINSTALL
+            else -> null
+        }
 
         // Claim immediately, before startup/resume Auto Scanner can inventory Downloads. Resolving
         // this key is metadata-only (name + size); it never hashes or copies the APK.
@@ -164,6 +171,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
                     replaceRequest = currentReplace,
                     reinstallAssessment = currentReinstall,
                     installProgress = currentProgress,
+                    forcedMode = forcedInstallMode,
                     onCancel = { finish() },
                     onArchiveAndInstall = ::archiveAndInstall,
                     onConfirmReplace = ::confirmReplacement,
@@ -427,6 +435,7 @@ private fun OpenApkInstallerScreen(
     replaceRequest: ReplaceRequest?,
     reinstallAssessment: ReinstallAssessment?,
     installProgress: InstallProgress?,
+    forcedMode: OpenInstallMode?,
     onCancel: () -> Unit,
     onArchiveAndInstall: (String, OpenInstallMode) -> Unit,
     onConfirmReplace: () -> Unit,
@@ -455,7 +464,17 @@ private fun OpenApkInstallerScreen(
                             Icon(Icons.Rounded.ArrowBack, contentDescription = "Cancel")
                         }
                     },
-                    title = { Text("APKbox Installer", fontWeight = FontWeight.SemiBold) },
+                    title = {
+                        Text(
+                            when (forcedMode) {
+                                OpenInstallMode.NORMAL -> "APKbox · Install"
+                                OpenInstallMode.UNATTENDED -> "APKbox · Unattended"
+                                OpenInstallMode.REINSTALL -> "APKbox · Uninstall & reinstall"
+                                null -> "APKbox Installer"
+                            },
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 )
                 when {
@@ -477,34 +496,66 @@ private fun OpenApkInstallerScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            TextButton(enabled = !busy, onClick = onCancel) { Text("Cancel") }
-                            Spacer(Modifier.weight(1f))
+                        if (forcedMode == null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                TextButton(enabled = !busy, onClick = onCancel) { Text("Cancel") }
+                                Spacer(Modifier.weight(1f))
+                                OutlinedButton(
+                                    enabled = !busy,
+                                    onClick = { onArchiveAndInstall(selected, OpenInstallMode.NORMAL) },
+                                ) { Text("Install") }
+                                Button(
+                                    enabled = !busy,
+                                    onClick = { onArchiveAndInstall(selected, OpenInstallMode.UNATTENDED) },
+                                ) { Text("Unattended") }
+                            }
                             OutlinedButton(
                                 enabled = !busy,
-                                onClick = { onArchiveAndInstall(selected, OpenInstallMode.NORMAL) },
-                            ) { Text("Install") }
-                            Button(
-                                enabled = !busy,
-                                onClick = { onArchiveAndInstall(selected, OpenInstallMode.UNATTENDED) },
-                            ) { Text("Unattended") }
-                        }
-                        OutlinedButton(
-                            enabled = !busy,
-                            onClick = { onArchiveAndInstall(selected, OpenInstallMode.REINSTALL) },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("Uninstall & reinstall")
-                                Text(
-                                    "Fix signature conflicts · Android Package Installer",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    textAlign = TextAlign.Center,
-                                )
+                                onClick = { onArchiveAndInstall(selected, OpenInstallMode.REINSTALL) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Uninstall & reinstall")
+                                    Text(
+                                        "Fix signature conflicts · Android Package Installer",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                TextButton(enabled = !busy, onClick = onCancel) { Text("Cancel") }
+                                Button(
+                                    enabled = !busy,
+                                    onClick = { onArchiveAndInstall(selected, forcedMode) },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            when (forcedMode) {
+                                                OpenInstallMode.NORMAL -> "Archive & install"
+                                                OpenInstallMode.UNATTENDED -> "Archive & install unattended"
+                                                OpenInstallMode.REINSTALL -> "Uninstall & reinstall"
+                                            }
+                                        )
+                                        if (forcedMode == OpenInstallMode.REINSTALL) {
+                                            Text(
+                                                "Fix signature conflicts · Android Package Installer",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                textAlign = TextAlign.Center,
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -602,7 +653,12 @@ private fun OpenApkInstallerScreen(
 
                     Spacer(Modifier.size(16.dp))
                     Text(
-                        "All install types archive and verify the exact incoming APK first. Install uses Android's normal confirmation. Unattended uses Shizuku/Sui or paired self-healing Wireless ADB. Uninstall & reinstall is the explicit signature-conflict repair path: it selects the best available removal method, reports whether app data can be preserved, then installs the verified APK through Android Package Installer.",
+                        when (forcedMode) {
+                            null -> "All install types archive and verify the exact incoming APK first. Install uses Android's normal confirmation. Unattended uses Shizuku/Sui or paired self-healing Wireless ADB. Uninstall & reinstall is the explicit signature-conflict repair path: it selects the best available removal method, reports whether app data can be preserved, then installs the verified APK through Android Package Installer."
+                            OpenInstallMode.NORMAL -> "Direct resolver mode: Install. APKbox will archive and verify the exact incoming APK, then use Android's normal Package Installer confirmation."
+                            OpenInstallMode.UNATTENDED -> "Direct resolver mode: Unattended. APKbox will archive and verify the exact incoming APK, then use Shizuku/Sui or paired self-healing Wireless ADB for the unattended install."
+                            OpenInstallMode.REINSTALL -> "Direct resolver mode: Uninstall & reinstall. APKbox will archive and verify the exact incoming APK, probe all removal/data-preservation methods, report the result before removal, then install through Android Package Installer."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
