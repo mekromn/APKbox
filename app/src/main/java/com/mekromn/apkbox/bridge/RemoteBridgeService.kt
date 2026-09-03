@@ -147,9 +147,7 @@ class RemoteBridgeService : Service() {
                 heartbeatFingerprint != lastHeartbeatFingerprint ||
                 now - lastHeartbeat >= HEARTBEAT_KEEPALIVE_MS
             if (heartbeatDue) {
-                // Keep the existing ADB fields in Continuity for protocol compatibility; the local
-                // fingerprint/status now also tracks Shizuku/Sui and avoids unnecessary ADB healing.
-                runCatching { relay.heartbeat(config, token, adb.status.value) }
+                runCatching { relay.heartbeat(config, token, privileged.status.value) }
                     .onSuccess {
                         lastHeartbeat = now
                         lastHeartbeatFingerprint = heartbeatFingerprint
@@ -365,6 +363,8 @@ class RemoteBridgeService : Service() {
         val status = privileged.status.value
         val adbState = status.adb
         val shizuku = status.shizuku
+        append(BridgeCapabilityCatalog.SKILL_REVISION).append('|')
+        append(BridgeCapabilityCatalog.CAPABILITY_SCHEMA).append('|')
         append(config.enabled).append('|')
         append(config.deviceId).append('|')
         append(config.repoOwner).append('/').append(config.repoName).append('|')
@@ -416,6 +416,12 @@ class RemoteBridgeService : Service() {
                         append(pending.request.source)
                         append("\n\n")
                         append(pending.request.reason.ifBlank { requestSummary(pending.request) })
+                        pending.request.runId.takeIf { it.isNotBlank() }?.let {
+                            append("\n\nRun ID: ").append(it)
+                        }
+                        pending.request.buildId.takeIf { it.isNotBlank() }?.let {
+                            append("\nBuild ID: ").append(it)
+                        }
                         pending.request.command.takeIf { it.isNotBlank() }?.let {
                             append("\n\n")
                             append(it.take(2_000))
@@ -543,7 +549,11 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.UI_TEXT -> "Type text in ${request.packageName}"
         BridgeCommandType.UI_KEY -> "Send key ${request.keyCode} in ${request.packageName}"
         BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
-        BridgeCommandType.AGENT_START -> "Start autonomous run ${request.runId.ifBlank { request.packageName }}"
+        BridgeCommandType.AGENT_START -> "Start autonomous run ${request.runId}"
+        BridgeCommandType.AGENT_RESUME -> "Resume autonomous run ${request.runId}"
+        BridgeCommandType.AGENT_STATUS -> "Read autonomous run ${request.runId} status"
+        BridgeCommandType.BUILD_START -> "Start build ${request.buildId.ifBlank { request.runId }}"
+        BridgeCommandType.BUILD_STATUS -> "Read build ${request.runId.ifBlank { request.buildId }} status"
     }
 
     private fun recordRelayFailure(failure: Throwable) {
