@@ -19,6 +19,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!--
+      Development permission that APKbox can self-grant once through an already-authorized
+      Shizuku/Sui or Wireless ADB session. APKbox uses it only to write the official
+      Settings.Global adb_wifi_enabled flag, allowing future Wireless Debugging self-start without
+      requiring an already-live privileged transport. Android still enforces Wi-Fi/trusted-network
+      policy and the existing ADB pairing identity.
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
     <application
         android:name=".ApkBoxApplication"
         android:allowBackup="false"
