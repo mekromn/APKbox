@@ -6,8 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import android.os.StatFs
-import com.mekromn.apkbox.bridge.AdbBridgeManager
-import com.mekromn.apkbox.bridge.AdbInstallResult
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedInstallResult
 import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.data.TempStorageManager
 import com.mekromn.apkbox.model.ApkRecord
@@ -132,18 +132,18 @@ class ApkInstaller(
     }
 
     /**
-     * User-selected silent install through APKbox's paired/self-healing Wireless ADB connection.
-     * The APK is never materialized as an APKbox cache file. Instead FastApkStager reconstructs or
-     * reads the prepared source straight into an ADB install session. Android is not allowed to
-     * commit the session until FastApkStager has verified the complete outgoing SHA-256.
+     * User-selected unattended install through APKbox's best available privileged transport:
+     * Shizuku/Sui or the paired/self-healing Wireless ADB connection. The APK is never materialized
+     * as an APKbox cache file. FastApkStager streams directly into an uncommitted Android install
+     * session, and Android is not allowed to commit until full outgoing SHA-256 verification passes.
      */
     suspend fun installUnattended(
         record: ApkRecord,
-        adb: AdbBridgeManager,
+        privileged: PrivilegedBridgeManager,
         preparedSource: File? = null,
         allowDowngrade: Boolean = false,
         onProgress: ((InstallProgress) -> Unit)? = null,
-    ): AdbInstallResult = withContext(Dispatchers.IO) {
+    ): PrivilegedInstallResult = withContext(Dispatchers.IO) {
         require(PACKAGE_NAME_REGEX.matches(record.packageName)) { "Stored APK has an invalid package name." }
         TempStorageManager.cleanupRoutine(appContext)
         cleanupStaleSessions()
@@ -156,7 +156,7 @@ class ApkInstaller(
         val exactSize = plan.exactSize
         requireFreeInstallSpace(record, exactSize)
 
-        val result = adb.installVerifiedStream(
+        val result = privileged.installVerifiedStream(
             totalBytes = exactSize,
             allowDowngrade = allowDowngrade,
         ) { rawOutput ->
@@ -169,7 +169,7 @@ class ApkInstaller(
             "Android package manager rejected unattended install: ${result.output.take(2_000)}"
         }
 
-        val installedSha = installedBaseApkSha256(adb, record.packageName)
+        val installedSha = installedBaseApkSha256(privileged, record.packageName)
         check(installedSha.equals(record.sha256, ignoreCase = true)) {
             "Unattended install reported success, but installed base.apk SHA-256 '$installedSha' does not match ${record.sha256}."
         }
@@ -220,8 +220,8 @@ class ApkInstaller(
         }
     }
 
-    private suspend fun installedBaseApkSha256(adb: AdbBridgeManager, packageName: String): String {
-        val paths = adb.execute("pm path $packageName", 10)
+    private suspend fun installedBaseApkSha256(privileged: PrivilegedBridgeManager, packageName: String): String {
+        val paths = privileged.execute("pm path $packageName", 10)
         check(!paths.timedOut && (paths.exitCode == null || paths.exitCode == 0)) {
             "Could not verify the installed APK path."
         }
@@ -234,7 +234,7 @@ class ApkInstaller(
             "Android did not return a verifiable installed base.apk path."
         }
 
-        val hash = adb.execute("sha256sum $basePath", 20)
+        val hash = privileged.execute("sha256sum $basePath", 20)
         check(!hash.timedOut && (hash.exitCode == null || hash.exitCode == 0)) {
             "Could not verify installed base.apk SHA-256."
         }
