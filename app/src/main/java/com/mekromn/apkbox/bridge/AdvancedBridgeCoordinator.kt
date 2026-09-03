@@ -66,6 +66,7 @@ class AdvancedBridgeCoordinator(
     ): BridgeResult {
         val runId = requireRunId(request.runId)
         val plan = relay.fetchAgentPlan(config, token, runId)
+        requireOptionalPackageMatch(request.packageName, plan.targetPackage, "autonomous plan")
         val checkpoint = agentRunner.start(plan)
         val published = relay.writeAgentCheckpoint(config, token, checkpoint)
         return BridgeResult(
@@ -88,6 +89,8 @@ class AdvancedBridgeCoordinator(
         started: Long,
     ): BridgeResult {
         val runId = requireRunId(request.runId)
+        val before = agentRunner.checkpoint(runId) ?: error("No autonomous checkpoint exists for run $runId.")
+        requireOptionalPackageMatch(request.packageName, before.targetPackage, "persisted autonomous run")
         val checkpoint = agentRunner.resume(runId)
         val published = relay.writeAgentCheckpoint(config, token, checkpoint)
         return BridgeResult(
@@ -111,6 +114,7 @@ class AdvancedBridgeCoordinator(
     ): BridgeResult {
         val runId = requireRunId(request.runId)
         val checkpoint = agentRunner.checkpoint(runId) ?: error("No autonomous checkpoint exists for run $runId.")
+        requireOptionalPackageMatch(request.packageName, checkpoint.targetPackage, "persisted autonomous run")
         val published = relay.writeAgentCheckpoint(config, token, checkpoint)
         return BridgeResult(
             requestId = request.id,
@@ -133,25 +137,20 @@ class AdvancedBridgeCoordinator(
     ): BridgeResult {
         val buildId = requireBuildId(request)
         val candidate = relay.fetchBuildCandidate(config, token, buildId)
-        var checkpoint = buildRunner.run(candidate)
-        var buildPath = relay.writeBuildCheckpoint(config, token, checkpoint)
-        var agentSummary = ""
-
-        if (checkpoint.state == BuildRunState.TESTING && candidate.planRunId.isNotBlank()) {
-            val plan = relay.fetchAgentPlan(config, token, candidate.planRunId)
-            val agentCheckpoint = agentRunner.start(
-                plan = plan,
-                buildLabel = candidate.displayName.ifBlank { candidate.buildId },
-                buildSha256 = checkpoint.apkSha256,
-            )
-            val agentPath = relay.writeAgentCheckpoint(config, token, agentCheckpoint)
-            val passed = agentCheckpoint.state in setOf(AgentRunState.CHECKPOINT_REACHED, AgentRunState.COMPLETED)
-            val testDetail = "Autonomous test ${candidate.planRunId} reached ${agentCheckpoint.state}; checkpoint $agentPath."
-            checkpoint = buildRunner.completeTesting(candidate.runId, passed, testDetail) ?: checkpoint
-            buildPath = relay.writeBuildCheckpoint(config, token, checkpoint)
-            agentSummary = " $testDetail"
+        if (request.runId.isNotBlank()) {
+            require(request.runId == candidate.runId) {
+                "BUILD_START request runId '${request.runId}' does not match candidate runId '${candidate.runId}'."
+            }
         }
+        requireOptionalPackageMatch(request.packageName, candidate.targetPackage, "build candidate")
 
+        val checkpoint = buildRunner.run(candidate)
+        val buildPath = relay.writeBuildCheckpoint(config, token, checkpoint)
+        val testHint = if (checkpoint.state == BuildRunState.TESTING && candidate.planRunId.isNotBlank()) {
+            " Candidate names autonomous plan '${candidate.planRunId}', but APKbox did not start it under BUILD_START approval. Issue AGENT_START with that runId for a separate fresh approval."
+        } else {
+            ""
+        }
         val failed = checkpoint.state in setOf(
             BuildRunState.FAILED,
             BuildRunState.BLOCKED_SIGNATURE_MISMATCH,
@@ -162,7 +161,7 @@ class AdvancedBridgeCoordinator(
             requestId = request.id,
             status = if (failed) BridgeResultStatus.FAILED else BridgeResultStatus.SUCCESS,
             risk = risk,
-            detail = "Build ${candidate.buildId} reached ${checkpoint.state}; checkpoint $buildPath.$agentSummary",
+            detail = "Build ${candidate.buildId} reached ${checkpoint.state}; checkpoint $buildPath.$testHint",
             output = checkpoint.toJson().toString(2),
             durationMs = System.currentTimeMillis() - started,
         )
@@ -175,8 +174,15 @@ class AdvancedBridgeCoordinator(
         token: String,
         started: Long,
     ): BridgeResult {
-        val runId = requireRunId(request.runId.ifBlank { request.buildId })
+        val runId = if (request.runId.isNotBlank()) {
+            requireRunId(request.runId)
+        } else {
+            val buildId = request.buildId.trim()
+            require(ID_REGEX.matches(buildId)) { "BUILD_STATUS requires runId or a valid buildId." }
+            relay.fetchBuildCandidate(config, token, buildId).runId
+        }
         val checkpoint = buildRunner.checkpoint(runId) ?: error("No build checkpoint exists for run $runId.")
+        requireOptionalPackageMatch(request.packageName, checkpoint.targetPackage, "persisted build run")
         val published = relay.writeBuildCheckpoint(config, token, checkpoint)
         return BridgeResult(
             requestId = request.id,
@@ -198,5 +204,12 @@ class AdvancedBridgeCoordinator(
         val runId = value.trim()
         require(ID_REGEX.matches(runId)) { "A valid runId is required." }
         return runId
+    }
+
+    private fun requireOptionalPackageMatch(requestPackage: String, actualPackage: String, source: String) {
+        if (requestPackage.isBlank()) return
+        require(requestPackage == actualPackage) {
+            "Request package '$requestPackage' does not match $source package '$actualPackage'."
+        }
     }
 }
