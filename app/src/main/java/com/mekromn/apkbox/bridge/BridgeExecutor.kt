@@ -14,7 +14,7 @@ import kotlinx.coroutines.withContext
 
 class BridgeExecutor(
     context: Context,
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
     private val stateStore: BridgeStateStore,
 ) {
     companion object {
@@ -27,7 +27,7 @@ class BridgeExecutor(
 
     private val appContext = context.applicationContext
     private val notificationManager = appContext.getSystemService(NotificationManager::class.java)
-    private val screenAgent = ScreenAgentController(appContext, adb)
+    private val screenAgent = ScreenAgentController(appContext, privileged)
     private val actionLedger = AgentActionLedger(appContext)
 
     init {
@@ -207,9 +207,9 @@ class BridgeExecutor(
         )
         stateStore.savePopup(popup)
         postInformationNotification(request)
-        if (adb.ensureConnected()) {
+        if (privileged.ensureReady()) {
             runCatching {
-                adb.execute(
+                privileged.execute(
                     "am start -n ${appContext.packageName}/.bridge.BridgeMessageActivity --activity-new-task",
                     8,
                 )
@@ -223,7 +223,7 @@ class BridgeExecutor(
         command: String,
         started: Long,
     ): BridgeResult {
-        val shell = adb.execute(command, request.timeoutSeconds)
+        val shell = privileged.execute(command, request.timeoutSeconds)
         val status = when {
             shell.timedOut -> BridgeResultStatus.TIMED_OUT
             shell.exitCode == null || shell.exitCode == 0 -> BridgeResultStatus.SUCCESS
@@ -234,9 +234,9 @@ class BridgeExecutor(
             status = status,
             risk = risk,
             detail = when (status) {
-                BridgeResultStatus.SUCCESS -> "Command completed."
-                BridgeResultStatus.TIMED_OUT -> "Command timed out."
-                else -> "Command exited with code ${shell.exitCode}."
+                BridgeResultStatus.SUCCESS -> "Command completed through ${privileged.activeTransportLabel()}."
+                BridgeResultStatus.TIMED_OUT -> "Command timed out through ${privileged.activeTransportLabel()}."
+                else -> "Command exited with code ${shell.exitCode} through ${privileged.activeTransportLabel()}."
             },
             output = shell.output,
             exitCode = shell.exitCode,
