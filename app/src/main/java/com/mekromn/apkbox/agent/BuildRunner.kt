@@ -2,7 +2,7 @@ package com.mekromn.apkbox.agent
 
 import android.content.Context
 import android.net.Uri
-import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
 import com.mekromn.apkbox.model.ApkProject
@@ -16,7 +16,7 @@ import java.io.File
 class BuildRunner(
     context: Context,
     private val library: LibraryStore,
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
 ) {
     private val appContext = context.applicationContext
     private val store = BuildRunStore(appContext)
@@ -174,17 +174,21 @@ class BuildRunner(
             return@withLock finishAfterInstalled(candidate, checkpoint)
         }
 
-        checkpoint = transition(checkpoint, BuildRunState.INSTALLING, "Installing archived candidate unattended through paired Wireless ADB.")
+        checkpoint = transition(
+            checkpoint,
+            BuildRunState.INSTALLING,
+            "Installing archived candidate unattended through ${privileged.activeTransportLabel()}.",
+        )
         lastPersistBytes = -1L
         lastPersistAt = 0L
         val install = runCatching {
-            adb.installApk(apkFile, allowDowngrade = candidate.allowDowngrade) { sent, total ->
+            privileged.installApk(apkFile, allowDowngrade = candidate.allowDowngrade) { sent, total ->
                 val now = System.currentTimeMillis()
                 if (sent == total || sent - lastPersistBytes >= 16L * 1024L * 1024L || now - lastPersistAt >= 2_000L) {
                     checkpoint = checkpoint.copy(
                         downloadedBytes = sent,
                         expectedBytes = total,
-                        detail = "Unattended install: $sent / $total bytes streamed.",
+                        detail = "Unattended install via ${privileged.activeTransportLabel()}: $sent / $total bytes streamed.",
                         updatedAtEpochMs = now,
                     )
                     store.saveCheckpoint(checkpoint)
@@ -239,7 +243,7 @@ class BuildRunner(
         if (candidate.autoLaunch) {
             checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Launching newly installed ${candidate.targetPackage}.")
             val launch = runCatching {
-                adb.execute("monkey -p ${candidate.targetPackage} -c android.intent.category.LAUNCHER 1", 15)
+                privileged.execute("monkey -p ${candidate.targetPackage} -c android.intent.category.LAUNCHER 1", 15)
             }.getOrElse { failure ->
                 return fail(checkpoint, BuildRunState.FAILED, "Installed build could not be launched: ${message(failure)}")
             }
@@ -259,14 +263,14 @@ class BuildRunner(
     }
 
     private suspend fun installedPackageSha256(packageName: String): String {
-        val pathResult = runCatching { adb.execute("pm path $packageName", 10) }.getOrNull() ?: return ""
+        val pathResult = runCatching { privileged.execute("pm path $packageName", 10) }.getOrNull() ?: return ""
         val path = pathResult.output.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("package:") && it.endsWith("/base.apk") }
             ?.removePrefix("package:")
             ?: return ""
         if (!path.matches(Regex("[/A-Za-z0-9._=:+-]+"))) return ""
-        val hashResult = runCatching { adb.execute("sha256sum $path", 20) }.getOrNull() ?: return ""
+        val hashResult = runCatching { privileged.execute("sha256sum $path", 20) }.getOrNull() ?: return ""
         return Regex("(?i)^[0-9a-f]{64}").find(hashResult.output.trim())?.value?.lowercase().orEmpty()
     }
 
