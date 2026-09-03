@@ -90,6 +90,13 @@ object ApkBoxServices {
             ).also { privilegedBridgeManagerInstance = it }
         }
 
+    /**
+     * Non-creating peek used only by compatibility/status plumbing. It never creates a privileged
+     * transport behind the user's back; callers fall back to the information they already have when
+     * no manager has been initialized in this process.
+     */
+    fun existingPrivilegedBridge(): PrivilegedBridgeManager? = privilegedBridgeManagerInstance
+
     fun relayClient(): GitHubRelayClient =
         relayClientInstance ?: synchronized(lock) {
             relayClientInstance ?: GitHubRelayClient().also { relayClientInstance = it }
