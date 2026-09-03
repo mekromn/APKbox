@@ -40,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -69,6 +70,9 @@ import com.mekromn.apkbox.data.PreparedSharedApk
 import com.mekromn.apkbox.data.SharedApkAnalyzer
 import com.mekromn.apkbox.data.SharedApkPreview
 import com.mekromn.apkbox.install.ApkInstaller
+import com.mekromn.apkbox.install.InstallFlowRuntime
+import com.mekromn.apkbox.install.InstallFlowStage
+import com.mekromn.apkbox.install.InstallFlowStatus
 import com.mekromn.apkbox.install.InstallProgress
 import com.mekromn.apkbox.install.ReinstallAssessment
 import com.mekromn.apkbox.install.ReinstallCoordinator
@@ -80,12 +84,15 @@ import com.mekromn.apkbox.model.ReplaceReason
 import com.mekromn.apkbox.model.ReplaceRequest
 import com.mekromn.apkbox.ui.theme.APKboxTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.Closeable
 
 private const val OPEN_INSTALLER_NEW_PROJECT = "__new_project__"
+private const val PACKAGE_REMOVAL_TIMEOUT_MS = 10_000L
+private const val PACKAGE_REMOVAL_POLL_MS = 125L
 
 private enum class OpenInstallMode {
     NORMAL,
@@ -124,12 +131,48 @@ class OpenApkInstallerActivity : ComponentActivity() {
     ) { result ->
         val record = installWaitingForRemoval ?: return@registerForActivityResult
         installWaitingForRemoval = null
-        val stillInstalled = ApkInspector.inspectInstalled(this, record.packageName) != null
-        if (result.resultCode == Activity.RESULT_OK || !stillInstalled) {
-            message.value = "Installed package removed · opening Android Package Installer for the verified replacement"
-            requestInstall(record)
-        } else {
-            message.value = "Uninstall cancelled · installed app left unchanged"
+        lifecycleScope.launch {
+            busy.value = true
+            InstallFlowRuntime.update(
+                InstallFlowStage.VERIFYING_REMOVAL,
+                "Verifying the old package is actually gone",
+                "Android returned from its uninstall UI. APKbox will not stage the replacement until PackageManager proves ${record.packageName} is absent.",
+                packageName = record.packageName,
+            )
+
+            // Android can return RESULT_OK before PackageManager's package view has caught up. That
+            // used to send the flow straight back through normal signature-conflict detection and
+            // could loop forever. The absence barrier below is now mandatory.
+            val removed = awaitPackageRemoved(
+                record.packageName,
+                if (result.resultCode == Activity.RESULT_OK) PACKAGE_REMOVAL_TIMEOUT_MS else 2_000L,
+            )
+            if (removed) {
+                stageVerifiedReplacement(
+                    record,
+                    "Android uninstall completed and PackageManager now reports the old package absent.",
+                )
+            } else {
+                val stillInstalled = inspectInstalled(record.packageName) != null
+                if (result.resultCode != Activity.RESULT_OK && stillInstalled) {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.CANCELLED,
+                        "Uninstall cancelled",
+                        "The installed app is still present. APKbox did not stage or modify the replacement APK.",
+                        packageName = record.packageName,
+                    )
+                    message.value = "Uninstall cancelled · installed app left unchanged"
+                } else {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.FAILED,
+                        "Uninstall did not complete",
+                        "Android returned from uninstall, but ${record.packageName} is still installed after the bounded verification window. APKbox stopped before staging the replacement.",
+                        packageName = record.packageName,
+                    )
+                    message.value = "Android returned from uninstall, but the old package is still installed. Replacement was not staged."
+                }
+                busy.value = false
+            }
         }
     }
 
@@ -143,6 +186,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
             OPEN_APK_INSTALL_MODE_REINSTALL -> OpenInstallMode.REINSTALL
             else -> null
         }
+        InstallFlowRuntime.reset(mode = forcedInstallMode?.flowLabel().orEmpty())
 
         // Claim immediately, before startup/resume Auto Scanner can inventory Downloads. Resolving
         // this key is metadata-only (name + size); it never hashes or copies the APK.
@@ -159,6 +203,11 @@ class OpenApkInstallerActivity : ComponentActivity() {
                 val currentReplace = replaceRequest.collectAsStateWithLifecycle().value
                 val currentReinstall = reinstallAssessment.collectAsStateWithLifecycle().value
                 val currentProgress = installProgress.collectAsStateWithLifecycle().value
+                val currentFlow = InstallFlowRuntime.status.collectAsStateWithLifecycle().value
+
+                LaunchedEffect(currentFlow.stage) {
+                    if (currentFlow.stage.terminal) busy.value = false
+                }
 
                 OpenApkInstallerScreen(
                     preview = currentPreview,
@@ -171,6 +220,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
                     replaceRequest = currentReplace,
                     reinstallAssessment = currentReinstall,
                     installProgress = currentProgress,
+                    installFlow = currentFlow,
                     forcedMode = forcedInstallMode,
                     onCancel = { finish() },
                     onArchiveAndInstall = ::archiveAndInstall,
@@ -184,10 +234,20 @@ class OpenApkInstallerActivity : ComponentActivity() {
 
         val uri = sourceUri
         if (uri == null) {
+            InstallFlowRuntime.update(
+                InstallFlowStage.FAILED,
+                "No APK supplied",
+                "The open-with intent did not include an APK URI.",
+            )
             message.value = "No APK was supplied."
         } else {
             lifecycleScope.launch {
                 busy.value = true
+                InstallFlowRuntime.update(
+                    InstallFlowStage.READING_APK,
+                    "Reading incoming APK",
+                    "APKbox is inspecting the exact incoming file before any archive or install action.",
+                )
                 try {
                     preparedApk?.close()
                     preparedApk = SharedApkAnalyzer.prepareForInstall(
@@ -195,9 +255,25 @@ class OpenApkInstallerActivity : ComponentActivity() {
                         uri,
                         libraryStore.records.value,
                     )
-                    preview.value = preparedApk?.preview
+                    val prepared = preparedApk
+                    preview.value = prepared?.preview
+                    if (prepared != null) {
+                        InstallFlowRuntime.update(
+                            InstallFlowStage.READY,
+                            "APK ready",
+                            "Incoming SHA-256 ${prepared.preview.sha256}. Choose an archive target and install mode.",
+                            packageName = prepared.preview.packageName,
+                            mode = forcedInstallMode?.flowLabel(),
+                        )
+                    }
                 } catch (t: Throwable) {
-                    message.value = t.message ?: "Android could not inspect this APK."
+                    val detail = t.message ?: "Android could not inspect this APK."
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.FAILED,
+                        "Could not read APK",
+                        detail,
+                    )
+                    message.value = detail
                 } finally {
                     busy.value = false
                 }
@@ -239,6 +315,14 @@ class OpenApkInstallerActivity : ComponentActivity() {
             replaceRequest.value = null
             reinstallAssessment.value = null
             message.value = null
+            InstallFlowRuntime.reset(incoming.packageName, mode.flowLabel())
+            InstallFlowRuntime.update(
+                InstallFlowStage.ARCHIVING_VERIFYING,
+                "Archiving and verifying exact APK",
+                "APKbox is storing the incoming APK in the selected project and will require the archived SHA-256 to remain ${incoming.sha256} before continuing.",
+                packageName = incoming.packageName,
+                mode = mode.flowLabel(),
+            )
             try {
                 val preparedUri = Uri.fromFile(prepared.file)
                 val record = withContext(Dispatchers.IO) {
@@ -272,7 +356,14 @@ class OpenApkInstallerActivity : ComponentActivity() {
                     OpenInstallMode.NORMAL -> requestInstall(record)
                 }
             } catch (t: Throwable) {
-                message.value = t.message ?: "APKbox could not archive this APK."
+                val detail = t.message ?: "APKbox could not archive this APK."
+                InstallFlowRuntime.update(
+                    InstallFlowStage.FAILED,
+                    "Archive/verification failed",
+                    detail,
+                    packageName = incoming.packageName,
+                )
+                message.value = detail
                 busy.value = false
             }
         }
@@ -308,7 +399,7 @@ class OpenApkInstallerActivity : ComponentActivity() {
                 return
             }
         }
-        installRecord(record)
+        installRecord(record, flowMode = "Install")
     }
 
     private fun prepareReinstall(record: ApkRecord) {
@@ -324,19 +415,46 @@ class OpenApkInstallerActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             busy.value = true
+            InstallFlowRuntime.update(
+                InstallFlowStage.ASSESSING_REINSTALL,
+                "Assessing reinstall",
+                "Checking installed signer/version, Shizuku/Sui, Wireless ADB, fallback uninstall UI, and the strongest data-preservation method that can actually be proven available.",
+                packageName = record.packageName,
+                mode = "Uninstall & reinstall",
+            )
             message.value = "Checking signatures, data-preservation options, Shizuku/Sui, and Wireless ADB…"
             try {
                 val assessment = reinstallCoordinator.assess(record)
                 if (!assessment.installed) {
-                    message.value = assessment.warning
+                    message.value = "No installed copy exists; uninstall is unnecessary. Staging the verified APK directly."
                     busy.value = false
-                    requestInstall(record)
+                    installRecord(
+                        record,
+                        flowMode = "Uninstall & reinstall",
+                        requirePackageAbsent = true,
+                    )
                     return@launch
                 }
                 reinstallAssessment.value = assessment
+                InstallFlowRuntime.update(
+                    InstallFlowStage.WAITING_REINSTALL_CONFIRMATION,
+                    "Reinstall plan ready · confirm before removal",
+                    assessment.warning,
+                    packageName = record.packageName,
+                    mode = "Uninstall & reinstall",
+                    removalMethod = assessment.removalMethod.displayLabel(),
+                    dataPreservation = assessment.preservationMode.displayLabel(),
+                )
                 message.value = null
             } catch (failure: Throwable) {
-                message.value = failure.message ?: failure.javaClass.simpleName
+                val detail = failure.message ?: failure.javaClass.simpleName
+                InstallFlowRuntime.update(
+                    InstallFlowStage.FAILED,
+                    "Could not assess reinstall",
+                    detail,
+                    packageName = record.packageName,
+                )
+                message.value = detail
             } finally {
                 busy.value = false
             }
@@ -350,7 +468,16 @@ class OpenApkInstallerActivity : ComponentActivity() {
 
         if (assessment.removalMethod == ReinstallRemovalMethod.ANDROID_UNINSTALL_UI) {
             installWaitingForRemoval = assessment.record
-            message.value = "Using Android's uninstall confirmation because no privileged uninstall transport is ready. After removal, APKbox will immediately open Package Installer for the verified APK."
+            InstallFlowRuntime.update(
+                InstallFlowStage.WAITING_UNINSTALL_CONFIRMATION,
+                "Waiting for Android uninstall confirmation",
+                "No silent privileged removal transport is ready. Confirm uninstall in Android. APKbox will then wait until PackageManager proves the old package is gone before staging the replacement.",
+                packageName = assessment.record.packageName,
+                mode = "Uninstall & reinstall",
+                removalMethod = assessment.removalMethod.displayLabel(),
+                dataPreservation = assessment.preservationMode.displayLabel(),
+            )
+            message.value = "Using Android's uninstall confirmation because no privileged uninstall transport is ready. Replacement staging is blocked until removal is verified."
             @Suppress("DEPRECATION")
             val uninstallIntent = Intent(
                 Intent.ACTION_UNINSTALL_PACKAGE,
@@ -359,13 +486,39 @@ class OpenApkInstallerActivity : ComponentActivity() {
             runCatching { uninstallLauncher.launch(uninstallIntent) }
                 .onFailure { failure ->
                     installWaitingForRemoval = null
-                    message.value = failure.message ?: "Android could not open uninstall confirmation."
+                    val detail = failure.message ?: "Android could not open uninstall confirmation."
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.FAILED,
+                        "Could not open uninstall confirmation",
+                        detail,
+                        packageName = assessment.record.packageName,
+                    )
+                    message.value = detail
                 }
             return
         }
 
         lifecycleScope.launch {
             busy.value = true
+            val stage = if (assessment.preservationMode == ReinstallPreservationMode.ROOT_BEST_EFFORT) {
+                InstallFlowStage.BACKING_UP_DATA
+            } else {
+                InstallFlowStage.REQUESTING_UNINSTALL
+            }
+            val stageTitle = when (assessment.preservationMode) {
+                ReinstallPreservationMode.ROOT_BEST_EFFORT -> "Backing up private data before uninstall"
+                ReinstallPreservationMode.ANDROID_KEEP_DATA -> "Uninstalling package registration · keeping Android app data"
+                else -> "Uninstalling currently installed package"
+            }
+            InstallFlowRuntime.update(
+                stage,
+                stageTitle,
+                "Removal transport: ${assessment.transportLabel}. ${assessment.warning}",
+                packageName = assessment.record.packageName,
+                mode = "Uninstall & reinstall",
+                removalMethod = assessment.removalMethod.displayLabel(),
+                dataPreservation = assessment.preservationMode.displayLabel(),
+            )
             message.value = when (assessment.preservationMode) {
                 ReinstallPreservationMode.ROOT_BEST_EFFORT ->
                     "Creating root-only private-data backup before removing the conflicting signer…"
@@ -376,11 +529,16 @@ class OpenApkInstallerActivity : ComponentActivity() {
             try {
                 val removed = reinstallCoordinator.removeInstalled(assessment)
                 check(removed.removed) { removed.detail }
-                message.value = removed.detail + " Opening Android Package Installer…"
-                busy.value = false
-                requestInstall(assessment.record)
+                stageVerifiedReplacement(assessment.record, removed.detail)
             } catch (failure: Throwable) {
-                message.value = failure.message ?: failure.javaClass.simpleName
+                val detail = failure.message ?: failure.javaClass.simpleName
+                InstallFlowRuntime.update(
+                    InstallFlowStage.FAILED,
+                    "Uninstall/reinstall stopped before replacement staging",
+                    detail,
+                    packageName = assessment.record.packageName,
+                )
+                message.value = detail
                 busy.value = false
             }
         }
@@ -390,6 +548,15 @@ class OpenApkInstallerActivity : ComponentActivity() {
         val request = replaceRequest.value ?: return
         replaceRequest.value = null
         installWaitingForRemoval = request.record
+        InstallFlowRuntime.update(
+            InstallFlowStage.WAITING_UNINSTALL_CONFIRMATION,
+            "Waiting for Android uninstall confirmation",
+            "Normal install cannot replace the installed signature/version in place. After uninstall, APKbox will verify package absence and stage the already-verified APK directly without re-running conflict detection.",
+            packageName = request.record.packageName,
+            mode = "Install",
+            removalMethod = "Android uninstall confirmation",
+            dataPreservation = "Not guaranteed by normal replacement path",
+        )
         @Suppress("DEPRECATION")
         val uninstallIntent = Intent(
             Intent.ACTION_UNINSTALL_PACKAGE,
@@ -398,29 +565,134 @@ class OpenApkInstallerActivity : ComponentActivity() {
         runCatching { uninstallLauncher.launch(uninstallIntent) }
             .onFailure { failure ->
                 installWaitingForRemoval = null
-                message.value = failure.message ?: "Android could not open uninstall confirmation."
+                val detail = failure.message ?: "Android could not open uninstall confirmation."
+                InstallFlowRuntime.update(
+                    InstallFlowStage.FAILED,
+                    "Could not open uninstall confirmation",
+                    detail,
+                    packageName = request.record.packageName,
+                )
+                message.value = detail
             }
     }
 
-    private fun installRecord(record: ApkRecord) {
+    /**
+     * Hard post-uninstall barrier. This path deliberately never calls requestInstall(), because
+     * requestInstall() is a pre-removal decision function. Re-entering it was the source of the
+     * signature-conflict loop when PackageManager had not yet converged after Android uninstall UI.
+     */
+    private suspend fun stageVerifiedReplacement(record: ApkRecord, removalDetail: String) {
+        InstallFlowRuntime.update(
+            InstallFlowStage.VERIFYING_REMOVAL,
+            "Verifying removal barrier",
+            "$removalDetail APKbox is independently checking PackageManager before any replacement session can be created.",
+            packageName = record.packageName,
+        )
+        val absent = awaitPackageRemoved(record.packageName, PACKAGE_REMOVAL_TIMEOUT_MS)
+        if (!absent) {
+            InstallFlowRuntime.update(
+                InstallFlowStage.FAILED,
+                "Old package is still installed",
+                "The uninstall operation reported success, but ${record.packageName} remains installed. APKbox refused to stage the replacement so it cannot loop back into signature-conflict handling.",
+                packageName = record.packageName,
+            )
+            message.value = "Old package still appears installed. Replacement was not staged."
+            busy.value = false
+            return
+        }
+
+        busy.value = false
+        installRecord(
+            record = record,
+            flowMode = "Uninstall & reinstall",
+            requirePackageAbsent = true,
+            precedingDetail = removalDetail,
+        )
+    }
+
+    private fun installRecord(
+        record: ApkRecord,
+        flowMode: String,
+        requirePackageAbsent: Boolean = false,
+        precedingDetail: String = "",
+    ) {
         if (busy.value) return
         lifecycleScope.launch {
             busy.value = true
-            installProgress.value = InstallProgress(0L, record.sizeBytes, directPreparedSource = true)
             try {
+                if (requirePackageAbsent) {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.VERIFYING_REMOVAL,
+                        "Final package-absence check",
+                        "The replacement session cannot be created until ${record.packageName} is absent.",
+                        packageName = record.packageName,
+                        mode = flowMode,
+                    )
+                    check(awaitPackageRemoved(record.packageName, 2_500L)) {
+                        "Replacement staging blocked because ${record.packageName} still appears installed."
+                    }
+                }
+
+                InstallFlowRuntime.update(
+                    InstallFlowStage.STAGING_PACKAGE_INSTALLER,
+                    "Staging exact APK into Android Package Installer",
+                    buildString {
+                        if (precedingDetail.isNotBlank()) append(precedingDetail).append(' ')
+                        append("APKbox is streaming the archived exact bytes into one PackageInstaller session. Full outgoing SHA-256 verification must finish before commit.")
+                    },
+                    packageName = record.packageName,
+                    mode = flowMode,
+                )
+                installProgress.value = InstallProgress(0L, record.sizeBytes, directPreparedSource = true)
                 apkInstaller.install(
                     record = record,
                     preparedSource = preparedApk?.file,
                     onProgress = { progress -> installProgress.value = progress },
                 )
-                finish()
+
+                // Do not finish this Activity. Keeping APKbox foreground underneath the Android
+                // confirmation makes STATUS_PENDING_USER_ACTION launch reliable and gives the user a
+                // deterministic place to return for cancelled/failed status.
+                if (InstallFlowRuntime.status.value.stage == InstallFlowStage.STAGING_PACKAGE_INSTALLER) {
+                    InstallFlowRuntime.update(
+                        InstallFlowStage.WAITING_PACKAGE_INSTALLER_CONFIRMATION,
+                        "Waiting for Android Package Installer",
+                        "The exact verified APK session is committed. Android Package Installer should now be in front of APKbox. Confirm Install there; if you cancel or Android rejects it, return here for the exact result.",
+                        packageName = record.packageName,
+                        mode = flowMode,
+                    )
+                }
+                message.value = "Verified APK staged · waiting for Android Package Installer confirmation"
+                if (InstallFlowRuntime.status.value.stage.terminal) busy.value = false
             } catch (t: Throwable) {
-                message.value = t.message ?: "Installation could not be staged."
+                val detail = t.message ?: "Installation could not be staged."
+                InstallFlowRuntime.update(
+                    InstallFlowStage.FAILED,
+                    "Replacement staging failed",
+                    detail,
+                    packageName = record.packageName,
+                    mode = flowMode,
+                )
+                message.value = detail
+                busy.value = false
             } finally {
                 installProgress.value = null
-                busy.value = false
             }
         }
+    }
+
+    private suspend fun awaitPackageRemoved(packageName: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(0L)
+        do {
+            if (inspectInstalled(packageName) == null) return true
+            if (System.currentTimeMillis() >= deadline) break
+            delay(PACKAGE_REMOVAL_POLL_MS)
+        } while (true)
+        return inspectInstalled(packageName) == null
+    }
+
+    private suspend fun inspectInstalled(packageName: String) = withContext(Dispatchers.IO) {
+        ApkInspector.inspectInstalled(this@OpenApkInstallerActivity, packageName)
     }
 }
 
@@ -435,6 +707,7 @@ private fun OpenApkInstallerScreen(
     replaceRequest: ReplaceRequest?,
     reinstallAssessment: ReinstallAssessment?,
     installProgress: InstallProgress?,
+    installFlow: InstallFlowStatus,
     forcedMode: OpenInstallMode?,
     onCancel: () -> Unit,
     onArchiveAndInstall: (String, OpenInstallMode) -> Unit,
@@ -598,6 +871,11 @@ private fun OpenApkInstallerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
+                    if (installFlow.visible) {
+                        Spacer(Modifier.size(14.dp))
+                        InstallFlowStatusCard(installFlow)
+                    }
+
                     if (installProgress != null) {
                         Spacer(Modifier.size(12.dp))
                         val percent = (installProgress.fraction * 100f).toInt().coerceIn(0, 100)
@@ -654,15 +932,20 @@ private fun OpenApkInstallerScreen(
                     Spacer(Modifier.size(16.dp))
                     Text(
                         when (forcedMode) {
-                            null -> "All install types archive and verify the exact incoming APK first. Install uses Android's normal confirmation. Unattended uses Shizuku/Sui or paired self-healing Wireless ADB. Uninstall & reinstall is the explicit signature-conflict repair path: it selects the best available removal method, reports whether app data can be preserved, then installs the verified APK through Android Package Installer."
+                            null -> "All install types archive and verify the exact incoming APK first. Install uses Android's normal confirmation. Unattended uses Shizuku/Sui or paired self-healing Wireless ADB. Uninstall & reinstall is the explicit signature-conflict repair path: it selects the best available removal method, reports whether app data can be preserved, verifies the old package is truly absent, then stages the verified APK through Android Package Installer."
                             OpenInstallMode.NORMAL -> "Direct resolver mode: Install. APKbox will archive and verify the exact incoming APK, then use Android's normal Package Installer confirmation."
                             OpenInstallMode.UNATTENDED -> "Direct resolver mode: Unattended. APKbox will archive and verify the exact incoming APK, then use Shizuku/Sui or paired self-healing Wireless ADB for the unattended install."
-                            OpenInstallMode.REINSTALL -> "Direct resolver mode: Uninstall & reinstall. APKbox will archive and verify the exact incoming APK, probe all removal/data-preservation methods, report the result before removal, then install through Android Package Installer."
+                            OpenInstallMode.REINSTALL -> "Direct resolver mode: Uninstall & reinstall. APKbox will archive and verify the exact incoming APK, probe all removal/data-preservation methods, report the result before removal, enforce a verified package-absence barrier, then install through Android Package Installer."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+
+            if (preview == null && installFlow.visible) {
+                Spacer(Modifier.size(18.dp))
+                InstallFlowStatusCard(installFlow)
             }
 
             if (!message.isNullOrBlank()) {
@@ -708,19 +991,8 @@ private fun OpenApkInstallerScreen(
             ReinstallSignatureRelationship.DIFFERENT -> "Signing certificate: CONFLICT"
             ReinstallSignatureRelationship.UNKNOWN -> "Signing certificate: could not be proven equal"
         }
-        val preservation = when (assessment.preservationMode) {
-            ReinstallPreservationMode.ANDROID_KEEP_DATA -> "Private data: Android keep-data available"
-            ReinstallPreservationMode.ROOT_BEST_EFFORT -> "Private data: root/Sui best-effort backup + restore"
-            ReinstallPreservationMode.NONE -> "Private data: CANNOT be preserved with the currently available method"
-            ReinstallPreservationMode.NOT_NEEDED -> "Private data: no installed package"
-        }
-        val removal = when (assessment.removalMethod) {
-            ReinstallRemovalMethod.SHIZUKU_ROOT -> "Removal: Shizuku/Sui root"
-            ReinstallRemovalMethod.SHIZUKU_SHELL -> "Removal: Shizuku shell"
-            ReinstallRemovalMethod.WIRELESS_ADB -> "Removal: Wireless ADB"
-            ReinstallRemovalMethod.ANDROID_UNINSTALL_UI -> "Removal: Android uninstall confirmation · no Wi-Fi required"
-            ReinstallRemovalMethod.NONE -> "Removal: not needed"
-        }
+        val preservation = assessment.preservationMode.displayLabel()
+        val removal = assessment.removalMethod.displayLabel()
         val confirmLabel = when (assessment.preservationMode) {
             ReinstallPreservationMode.ROOT_BEST_EFFORT -> "Back up data & reinstall"
             ReinstallPreservationMode.ANDROID_KEEP_DATA -> "Keep data & reinstall"
@@ -733,12 +1005,49 @@ private fun OpenApkInstallerScreen(
             title = { Text("Uninstall & reinstall?") },
             text = {
                 Text(
-                    "Installed: $installed\n$signature\n$removal\n$preservation\n\n${assessment.warning}\n\nAfter removal, the exact archived incoming APK is installed using Android's normal Package Installer. APKbox will not silently change the selected data-preservation policy."
+                    "Installed: $installed\n$signature\nRemoval: $removal\nPrivate data: $preservation\n\n${assessment.warning}\n\nAfter removal, APKbox will wait until PackageManager proves the old package is absent. Only then will it stage the exact archived APK into Android Package Installer."
                 )
             },
             confirmButton = { TextButton(onClick = onConfirmReinstall) { Text(confirmLabel) } },
             dismissButton = { TextButton(onClick = onCancelReinstall) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun InstallFlowStatusCard(status: InstallFlowStatus) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            val stepText = if (status.stage.step > 0) {
+                "Step ${status.stage.step}/${status.stage.stepCount}"
+            } else {
+                "Install status"
+            }
+            Text(stepText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text(status.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            if (status.detail.isNotBlank()) {
+                Text(status.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (status.mode.isNotBlank()) {
+                Text("Mode: ${status.mode}", style = MaterialTheme.typography.labelMedium)
+            }
+            if (status.removalMethod.isNotBlank()) {
+                Text("Removal: ${status.removalMethod}", style = MaterialTheme.typography.labelMedium)
+            }
+            if (status.dataPreservation.isNotBlank()) {
+                Text("Data: ${status.dataPreservation}", style = MaterialTheme.typography.labelMedium)
+            }
+            if (status.packageName.isNotBlank()) {
+                Text(status.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 
@@ -787,4 +1096,25 @@ private fun InstallerProjectRow(
             RadioButton(selected = selected, onClick = onClick)
         }
     }
+}
+
+private fun OpenInstallMode.flowLabel(): String = when (this) {
+    OpenInstallMode.NORMAL -> "Install"
+    OpenInstallMode.UNATTENDED -> "Unattended"
+    OpenInstallMode.REINSTALL -> "Uninstall & reinstall"
+}
+
+private fun ReinstallRemovalMethod.displayLabel(): String = when (this) {
+    ReinstallRemovalMethod.SHIZUKU_ROOT -> "Shizuku/Sui root"
+    ReinstallRemovalMethod.SHIZUKU_SHELL -> "Shizuku shell"
+    ReinstallRemovalMethod.WIRELESS_ADB -> "Wireless ADB"
+    ReinstallRemovalMethod.ANDROID_UNINSTALL_UI -> "Android uninstall confirmation · no Wi-Fi required"
+    ReinstallRemovalMethod.NONE -> "Not needed"
+}
+
+private fun ReinstallPreservationMode.displayLabel(): String = when (this) {
+    ReinstallPreservationMode.ANDROID_KEEP_DATA -> "Android keep-data available"
+    ReinstallPreservationMode.ROOT_BEST_EFFORT -> "Root/Sui best-effort backup + restore"
+    ReinstallPreservationMode.NONE -> "Cannot be preserved with the currently available method"
+    ReinstallPreservationMode.NOT_NEEDED -> "No installed package"
 }
