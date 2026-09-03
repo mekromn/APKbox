@@ -51,7 +51,9 @@ object BridgePolicy {
         BridgeCommandType.APP_LOGCAT,
         BridgeCommandType.DUMPSYS,
         BridgeCommandType.UI_SNAPSHOT,
-        BridgeCommandType.SCREENSHOT -> BridgeRisk.READ_ONLY
+        BridgeCommandType.SCREENSHOT,
+        BridgeCommandType.AGENT_STATUS,
+        BridgeCommandType.BUILD_STATUS -> BridgeRisk.READ_ONLY
 
         BridgeCommandType.LAUNCH,
         BridgeCommandType.UI_TAP,
@@ -60,7 +62,12 @@ object BridgePolicy {
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
         BridgeCommandType.UI_WAIT,
-        BridgeCommandType.AGENT_START -> BridgeRisk.DEBUG_ACTION
+        BridgeCommandType.AGENT_START,
+        BridgeCommandType.AGENT_RESUME -> BridgeRisk.DEBUG_ACTION
+
+        // A build candidate may install/downgrade/launch an APK. Classify from the maximum possible
+        // effect rather than trusting remote candidate flags to lower the approval requirement.
+        BridgeCommandType.BUILD_START -> BridgeRisk.MUTATING
 
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
@@ -94,8 +101,8 @@ object BridgePolicy {
     /**
      * Autonomous screen interaction needs both package scope and run/sequence scope. A one-off
      * manually approved UI action may omit run metadata, but it can never inherit trusted-session
-     * auto-execution in that form. AGENT_START is intentionally excluded: approving a bounded plan
-     * is a fresh user decision and can never be inherited from an earlier trusted session.
+     * auto-execution in that form. Advanced plan start/resume are intentionally excluded: approving
+     * a bounded autonomous execution is always a fresh on-device decision.
      */
     private fun debugActionIsSafelyScoped(request: BridgeRequest): Boolean = when (request.type) {
         BridgeCommandType.LAUNCH -> validPackage(request.packageName)
@@ -105,7 +112,8 @@ object BridgePolicy {
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
         BridgeCommandType.UI_WAIT -> validPackage(request.packageName) && validRunSequence(request)
-        BridgeCommandType.AGENT_START -> false
+        BridgeCommandType.AGENT_START,
+        BridgeCommandType.AGENT_RESUME -> false
         else -> false
     }
 
