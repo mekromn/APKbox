@@ -1,6 +1,9 @@
 package com.mekromn.apkbox.bridge
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.provider.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,6 +27,7 @@ data class PrivilegedBridgeStatus(
     val activeTransport: PrivilegedTransportKind = PrivilegedTransportKind.NONE,
     val shizuku: ShizukuBridgeStatus = ShizukuBridgeStatus(),
     val adb: AdbBridgeStatus = AdbBridgeStatus(),
+    val persistentWirelessControl: Boolean = false,
 ) {
     val ready: Boolean
         get() = shizuku.usable || adb.connected
@@ -63,11 +67,18 @@ class PrivilegedBridgeManager(
     val adb: AdbBridgeManager,
     val shizuku: ShizukuBridgeManager,
 ) {
+    companion object {
+        // Settings.Global.ADB_WIFI_ENABLED is @hide from the public SDK; this is its stable AOSP key.
+        private const val ADB_WIFI_ENABLED_KEY = "adb_wifi_enabled"
+    }
+
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _status = MutableStateFlow(
         PrivilegedBridgeStatus(
             shizuku = shizuku.status.value,
             adb = adb.status.value,
+            persistentWirelessControl = hasPersistentWirelessControl(),
         )
     )
     val status: StateFlow<PrivilegedBridgeStatus> = _status.asStateFlow()
@@ -75,8 +86,6 @@ class PrivilegedBridgeManager(
     @Volatile private var lastSelected = PrivilegedTransportKind.NONE
 
     init {
-        @Suppress("UNUSED_VARIABLE")
-        val appContext = context.applicationContext
         scope.launch {
             shizuku.status.collect { updateStatus() }
         }
@@ -91,6 +100,42 @@ class PrivilegedBridgeManager(
         shizuku.refreshStatus()
         adb.refreshStatus()
         updateStatus()
+    }
+
+    fun hasPersistentWirelessControl(): Boolean =
+        appContext.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * One-time bootstrap. WRITE_SECURE_SETTINGS is an Android development permission, so an already
+     * authorized shell/root transport can grant it to APKbox. APKbox then uses the grant only for
+     * adb_wifi_enabled, not as a generic settings mutation capability.
+     */
+    suspend fun bootstrapPersistentWirelessControl(): Boolean {
+        if (hasPersistentWirelessControl()) {
+            updateStatus()
+            return true
+        }
+        val pkg = appContext.packageName
+        val command = "pm grant $pkg android.permission.WRITE_SECURE_SETTINGS"
+        val granted = when {
+            shizuku.ensureReady() -> {
+                val result = runCatching { shizuku.execute(command, 10) }.getOrNull()
+                result != null && !result.timedOut && (result.exitCode == null || result.exitCode == 0)
+            }
+            adb.ensureConnected() -> {
+                val result = runCatching { adb.execute(command, 10) }.getOrNull()
+                result != null && !result.timedOut && (result.exitCode == null || result.exitCode == 0)
+            }
+            else -> false
+        }
+        if (granted) {
+            repeat(5) {
+                if (hasPersistentWirelessControl()) return@repeat
+                delay(50)
+            }
+        }
+        updateStatus()
+        return hasPersistentWirelessControl()
     }
 
     suspend fun ensureReady(): Boolean = selectTransport() != PrivilegedTransportKind.NONE
@@ -164,18 +209,40 @@ class PrivilegedBridgeManager(
     }
 
     /**
-     * Try to make APKbox's already-paired Wireless ADB transport usable without opening Settings.
-     * If Shizuku/Sui is active, it can set Android's official adb_wifi_enabled global setting first.
-     * This never performs pairing or weakens Android authorization; an unpaired device still needs
-     * the one-time Pairing Assistant flow.
+     * Try every non-interactive route to make APKbox's already-paired Wireless ADB usable.
+     *
+     * 1. Reuse an existing/self-healed connection.
+     * 2. If APKbox has its one-time WRITE_SECURE_SETTINGS grant, enable adb_wifi_enabled locally.
+     * 3. If Shizuku/Sui is running, bootstrap that grant (or directly toggle as fallback).
+     *
+     * Android may still reject Wireless debugging when Wi-Fi is absent or the current network is not
+     * trusted. Pairing remains a separate Android authorization and is never bypassed here.
      */
     suspend fun tryStartWirelessDebugging(): Boolean {
         if (adb.ensureConnected()) {
+            runCatching { bootstrapPersistentWirelessControl() }
             markSelected(PrivilegedTransportKind.WIRELESS_ADB)
             return true
         }
+
+        if (hasPersistentWirelessControl()) {
+            if (writeWirelessDebuggingSetting(true)) {
+                delay(700L)
+                if (adb.autoConnect(timeoutMs = 8_000L)) {
+                    markSelected(PrivilegedTransportKind.WIRELESS_ADB)
+                    return true
+                }
+            }
+        }
+
         if (!shizuku.ensureReady()) return false
-        if (!shizuku.enableWirelessDebugging()) return false
+        val persisted = runCatching { bootstrapPersistentWirelessControl() }.getOrDefault(false)
+        val enabled = if (persisted) {
+            writeWirelessDebuggingSetting(true)
+        } else {
+            shizuku.enableWirelessDebugging()
+        }
+        if (!enabled) return false
         delay(700L)
         val connected = adb.autoConnect(timeoutMs = 8_000L)
         if (connected) markSelected(PrivilegedTransportKind.WIRELESS_ADB)
@@ -193,6 +260,17 @@ class PrivilegedBridgeManager(
     fun activeTransportLabel(): String = status.value.copy(activeTransport = activeTransport()).activeLabel
 
     fun rootAvailable(): Boolean = shizuku.status.value.usable && shizuku.status.value.root
+
+    private fun writeWirelessDebuggingSetting(enabled: Boolean): Boolean {
+        if (!hasPersistentWirelessControl()) return false
+        return runCatching {
+            Settings.Global.putInt(
+                appContext.contentResolver,
+                ADB_WIFI_ENABLED_KEY,
+                if (enabled) 1 else 0,
+            )
+        }.getOrDefault(false)
+    }
 
     private suspend fun selectTransport(): PrivilegedTransportKind {
         if (shizuku.ensureReady()) {
@@ -216,6 +294,7 @@ class PrivilegedBridgeManager(
             activeTransport = activeTransport(),
             shizuku = shizuku.status.value,
             adb = adb.status.value,
+            persistentWirelessControl = hasPersistentWirelessControl(),
         )
     }
 
