@@ -10,7 +10,7 @@
     <!-- Optional direct-storage access powers APKbox's own APK-focused file browser and Auto Scanner. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!-- Remote Debug Bridge: private GitHub relay + same-device Wireless ADB/mDNS. -->
+    <!-- Remote Debug Bridge: private GitHub relay + same-device privileged transports. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -77,7 +77,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Internal user-facing silent install flow backed by the paired same-device ADB bridge. -->
+        <!-- Internal user-facing silent install flow backed by Shizuku/Sui or Wireless ADB. -->
         <activity
             android:name=".UnattendedInstallActivity"
             android:exported="false"
@@ -100,7 +100,7 @@
             android:screenOrientation="unspecified" />
 
         <!--
-          Display-only and intentionally exported so the paired ADB shell can surface an
+          Display-only and intentionally exported so a privileged shell transport can surface an
           informational ChatGPT popup despite Android background-activity restrictions. It cannot
           execute commands or alter bridge approval state; it only renders message data already
           stored inside APKbox's private app storage.
@@ -117,7 +117,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-enabled ChatGPT remote debugging relay and same-device Wireless ADB bridge" />
+                android:value="User-enabled ChatGPT remote debugging relay using Shizuku, Sui, or same-device Wireless ADB" />
         </service>
 
         <!--
@@ -137,6 +137,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/pairing_assistant_service" />
         </service>
+
+        <!-- Official Shizuku/Sui Binder delivery endpoint. Sui is initialized automatically. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
