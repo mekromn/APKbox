@@ -22,6 +22,8 @@ class BridgePolicyTest {
         )
         assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.UI_SNAPSHOT)))
         assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.SCREENSHOT)))
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.AGENT_STATUS, runId = "run-1")))
+        assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request(BridgeCommandType.BUILD_STATUS, runId = "build-run-1")))
     }
 
     @Test
@@ -61,6 +63,24 @@ class BridgePolicyTest {
                     now = now,
                 )
             )
+            assertFalse(BridgePolicy.trustedSessionEligible(request))
+        }
+    }
+
+    @Test
+    fun buildStartIsAlwaysMutatingAndNeedsFreshApproval() {
+        val start = request(BridgeCommandType.BUILD_START, runId = "build-run-1", buildId = "candidate-1")
+        assertEquals(BridgeRisk.MUTATING, BridgePolicy.classify(start))
+        assertFalse(BridgePolicy.mayAutoExecute(start, trustedUntil, true, true, now))
+        assertFalse(BridgePolicy.trustedSessionEligible(start))
+    }
+
+    @Test
+    fun autonomousStartAndResumeNeverInheritTrustedSession() {
+        listOf(BridgeCommandType.AGENT_START, BridgeCommandType.AGENT_RESUME).forEach { type ->
+            val request = request(type, packageName = "com.example.app", runId = "camera-run-42")
+            assertEquals(BridgeRisk.DEBUG_ACTION, BridgePolicy.classify(request))
+            assertFalse(BridgePolicy.mayAutoExecute(request, trustedUntil, true, true, now))
             assertFalse(BridgePolicy.trustedSessionEligible(request))
         }
     }
@@ -146,6 +166,7 @@ class BridgePolicyTest {
         service: String = "",
         message: String = "",
         runId: String = "",
+        buildId: String = "",
         sequenceNumber: Long = 0L,
     ) = BridgeRequest(
         id = "test-request",
@@ -155,6 +176,7 @@ class BridgePolicyTest {
         service = service,
         message = message,
         runId = runId,
+        buildId = buildId,
         sequenceNumber = sequenceNumber,
         createdAtEpochMs = now,
         expiresAtEpochMs = trustedUntil,
