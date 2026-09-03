@@ -13,7 +13,7 @@ import org.json.JSONObject
 object BridgeCapabilityCatalog {
     const val PROTOCOL_VERSION = 3
     const val CAPABILITY_SCHEMA = 2
-    const val SKILL_REVISION = "2026-09-03.1"
+    const val SKILL_REVISION = "2026-09-03.2"
     const val SKILL_REPOSITORY = "mekromn/Continuity"
     const val SKILL_PATH = "skills/apkbox-remote-bridge/SKILL.md"
     const val PROTOCOL_PATH = "bridge/README.md"
@@ -34,7 +34,7 @@ object BridgeCapabilityCatalog {
                 .put("repository", SKILL_REPOSITORY)
                 .put("path", SKILL_PATH)
                 .put("protocolPath", PROTOCOL_PATH)
-                .put("rule", "Read the live state first, then read this skill before issuing bridge requests."))
+                .put("rule", "Read the live state first, then read this skill before issuing bridge requests. If the skill revision differs from live state, fetch the authoritative Continuity skill before acting."))
             .put("privilegedTransport", JSONObject()
                 .put("ready", privileged.ready)
                 .put("active", privileged.activeLabel)
@@ -71,13 +71,16 @@ object BridgeCapabilityCatalog {
                         "LAUNCH", "TAP", "FIND_TAP", "SWIPE", "TEXT", "KEY", "WAIT",
                         "SNAPSHOT", "SCREENSHOT", "SLEEP", "CHECKPOINT"
                     )))
-                    .put("freshApprovalForStartOrResume", true))
+                    .put("freshApprovalForStartOrResume", true)
+                    .put("interruptionRecoveryCommand", "AGENT_STATUS"))
                 .put("buildRunner", JSONObject()
                     .put("commands", JSONArray(listOf("BUILD_START", "BUILD_STATUS")))
                     .put("candidatePath", "bridge/devices/<device-id>/builds/<buildId>.json")
                     .put("checkpointPath", "bridge/devices/<device-id>/build-runs/<runId>/checkpoint.json")
-                    .put("canChainPlanRunId", true)
-                    .put("freshApprovalForStart", true)))
+                    .put("canChainPlanRunIdUnderBuildApproval", false)
+                    .put("planRunIdRequiresSeparateAgentStart", true)
+                    .put("freshApprovalForStart", true)
+                    .put("interruptionRecoveryCommand", "BUILD_STATUS")))
             .put("deviceCapabilities", JSONArray(listOf(
                 "privileged_shell_shizuku_sui_or_wireless_adb",
                 "wireless_adb_auto_heal",
@@ -90,6 +93,7 @@ object BridgeCapabilityCatalog {
                 "build_download_verify_archive_install_launch",
                 "unattended_verified_apk_install",
                 "installed_base_apk_sha256_verification",
+                "durable_bridge_inflight_reservations",
                 "local_signature_conflict_reinstall"
             )))
             .put("limits", JSONObject()
@@ -109,6 +113,10 @@ object BridgeCapabilityCatalog {
                 .put("dangerousAlwaysNeedsFreshApproval", true)
                 .put("advancedStartResumeNeedsFreshApproval", true)
                 .put("trustedSessionNeverGrantsBlanketShell", true)
+                .put("durableInFlightReservationBeforeExecution", true)
+                .put("finalResultJournalBeforeRelayDelivery", true)
+                .put("ambiguousInterruptedRequestsAreNeverReplayed", true)
+                .put("advancedInterruptionRecoveryUsesStatusCommands", true)
                 .put("atMostOnceJournal", true))
             .put("knownLimitations", JSONArray(listOf(
                 "Relay SCREENSHOT is currently a scaled JPEG preview, not an exact forensic capture.",
