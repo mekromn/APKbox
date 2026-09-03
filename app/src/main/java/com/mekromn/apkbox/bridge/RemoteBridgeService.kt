@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 class RemoteBridgeService : Service() {
     companion object {
@@ -62,6 +63,7 @@ class RemoteBridgeService : Service() {
     private val relay by lazy { ApkBoxServices.relayClient() }
     private val executor by lazy { ApkBoxServices.bridgeExecutor(applicationContext) }
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
+    private val activeRequestIds = ConcurrentHashMap.newKeySet<String>()
 
     private var loopJob: Job? = null
     @Volatile private var forcePoll = false
@@ -128,6 +130,11 @@ class RemoteBridgeService : Service() {
             maybePreparePrivilegedTransport(config)
             val now = System.currentTimeMillis()
 
+            // Any persisted in-flight entry not owned by a currently executing coroutine is from an
+            // interrupted process/service lifetime. Never replay it automatically: close it with a
+            // deterministic result, and let advanced workflows recover through their checkpoints.
+            reconcileInterruptedInFlight()
+
             runCatching { flushCompleted(config, token) }
                 .onFailure { recordRelayFailure(it) }
 
@@ -176,7 +183,7 @@ class RemoteBridgeService : Service() {
     private suspend fun pollInbox(config: BridgeConfig, token: String) {
         val items = relay.fetchInbox(config, token)
         for (item in items) {
-            if (stateStore.hasCompleted(item.request.id)) continue
+            if (stateStore.hasCompleted(item.request.id) || stateStore.hasInFlight(item.request.id)) continue
             val request = item.request
             val risk = BridgePolicy.classify(request)
 
@@ -226,8 +233,63 @@ class RemoteBridgeService : Service() {
     }
 
     private suspend fun executeAndJournal(item: RelayInboxItem, risk: BridgeRisk) {
+        val pending = BridgePendingRequest(item.request, risk, item.path, item.sha)
+        beginInFlight(pending)
         val result = executor.execute(item.request, risk)
         journalResult(item, result)
+        finishInFlight(item.request.id)
+    }
+
+    private fun beginInFlight(pending: BridgePendingRequest) {
+        synchronized(activeRequestIds) {
+            // File first, memory second. If the process dies between these operations the next
+            // process sees a durable ambiguous execution and refuses to replay it.
+            stateStore.saveInFlight(pending)
+            activeRequestIds.add(pending.request.id)
+        }
+    }
+
+    private fun finishInFlight(requestId: String) {
+        synchronized(activeRequestIds) {
+            // A final result must already be journaled before this is called.
+            stateStore.clearInFlight(requestId)
+            activeRequestIds.remove(requestId)
+        }
+    }
+
+    private fun reconcileInterruptedInFlight() {
+        for (inFlight in stateStore.loadInFlight()) {
+            val requestId = inFlight.request.id
+            val currentlyExecuting = synchronized(activeRequestIds) { activeRequestIds.contains(requestId) }
+            if (currentlyExecuting) continue
+            if (stateStore.hasCompleted(requestId)) {
+                stateStore.clearInFlight(requestId)
+                continue
+            }
+
+            val recoveryHint = when (inFlight.request.type) {
+                BridgeCommandType.AGENT_START,
+                BridgeCommandType.AGENT_RESUME ->
+                    "Use AGENT_STATUS with runId '${inFlight.request.runId}' to inspect APKbox's persisted autonomous checkpoint; do not blindly repeat the start/resume request."
+                BridgeCommandType.BUILD_START ->
+                    "Use BUILD_STATUS with runId/buildId from this request to inspect APKbox's persisted build checkpoint; do not blindly repeat BUILD_START."
+                else ->
+                    "The operation's final effect is ambiguous, so APKbox will not replay the same request automatically. Inspect device state before issuing a new request ID."
+            }
+            val result = BridgeResult(
+                requestId = requestId,
+                status = BridgeResultStatus.FAILED,
+                risk = inFlight.risk,
+                detail = "APKbox was interrupted after request execution was durably reserved but before a final result was journaled. $recoveryHint",
+            )
+            stateStore.saveCompleted(inFlight.completed(result))
+            stateStore.clearInFlight(requestId)
+            stateStore.addEvent(
+                "Interrupted request closed without replay",
+                "$requestId · $recoveryHint",
+                success = false,
+            )
+        }
     }
 
     private fun journalResult(item: RelayInboxItem, result: BridgeResult) {
@@ -301,31 +363,40 @@ class RemoteBridgeService : Service() {
     private suspend fun resolvePending(allow: Boolean, trust: Boolean) {
         val pending = stateStore.loadPending() ?: return
         notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
-        stateStore.clearPending()
         BridgeRuntime.update { it.copy(pendingRequestId = "") }
 
         val item = RelayInboxItem(pending.inboxPath, pending.inboxSha, pending.request)
         val result = when {
-            pending.request.isExpired() -> BridgeResult(
-                requestId = pending.request.id,
-                status = BridgeResultStatus.EXPIRED,
-                risk = pending.risk,
-                detail = "Request expired while waiting for approval.",
-            )
-            !allow -> BridgeResult(
-                requestId = pending.request.id,
-                status = BridgeResultStatus.DENIED,
-                risk = pending.risk,
-                detail = "Denied on device.",
-            )
+            pending.request.isExpired() -> {
+                stateStore.clearPending()
+                BridgeResult(
+                    requestId = pending.request.id,
+                    status = BridgeResultStatus.EXPIRED,
+                    risk = pending.risk,
+                    detail = "Request expired while waiting for approval.",
+                )
+            }
+            !allow -> {
+                stateStore.clearPending()
+                BridgeResult(
+                    requestId = pending.request.id,
+                    status = BridgeResultStatus.DENIED,
+                    risk = pending.risk,
+                    detail = "Denied on device.",
+                )
+            }
             else -> {
                 if (trust && BridgePolicy.trustedSessionEligible(pending.request)) {
                     prefs.setTrustedUntil(System.currentTimeMillis() + 10 * 60_000L)
                 }
+                beginInFlight(pending)
+                // Clear approval only after the durable in-flight reservation exists.
+                stateStore.clearPending()
                 executor.execute(pending.request, pending.risk)
             }
         }
         journalResult(item, result)
+        if (allow && !pending.request.isExpired()) finishInFlight(pending.request.id)
 
         val config = prefs.state.value
         val token = prefs.relayToken()
