@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.mekromn.apkbox.ApkBoxServices
 import com.mekromn.apkbox.agent.AgentActionLedger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,6 +30,8 @@ class BridgeExecutor(
     private val notificationManager = appContext.getSystemService(NotificationManager::class.java)
     private val screenAgent = ScreenAgentController(appContext, privileged)
     private val actionLedger = AgentActionLedger(appContext)
+    private val prefs by lazy { ApkBoxServices.bridgePreferences(appContext) }
+    private val advanced by lazy { AdvancedBridgeCoordinator(appContext, ApkBoxServices.relayClient()) }
 
     init {
         createChannels()
@@ -154,9 +157,11 @@ class BridgeExecutor(
                     screenAgent.waitFor(request.packageName, request.selector, request.timeoutSeconds),
                     started,
                 )
-                BridgeCommandType.AGENT_START -> error(
-                    "AGENT_START must be handled by RemoteBridgeService after fetching the approved plan from Continuity."
-                )
+                BridgeCommandType.AGENT_START,
+                BridgeCommandType.AGENT_RESUME,
+                BridgeCommandType.AGENT_STATUS,
+                BridgeCommandType.BUILD_START,
+                BridgeCommandType.BUILD_STATUS -> executeAdvanced(request, risk)
             }
         }.getOrElse { failure ->
             BridgeResult(
@@ -171,6 +176,15 @@ class BridgeExecutor(
     }
 
     fun deleteLocalArtifact(path: String) = screenAgent.deleteLocalArtifact(path)
+
+    private suspend fun executeAdvanced(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
+        check(AdvancedBridgeCoordinator.handles(request.type)) { "Unsupported advanced bridge request ${request.type}." }
+        val config = prefs.state.value
+        check(config.enabled) { "Remote Debug Bridge is not enabled." }
+        val token = prefs.relayToken()
+        check(token.isNotBlank()) { "Continuity relay token is not configured." }
+        return advanced.execute(request, risk, config, token)
+    }
 
     private fun needsActionReservation(type: BridgeCommandType): Boolean = when (type) {
         BridgeCommandType.LAUNCH,
