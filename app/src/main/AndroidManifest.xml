@@ -56,10 +56,9 @@
         </activity>
 
         <!--
-          Transient package-manager-style path: open/install an APK with APKbox, choose a Project,
-          archive/verify it, then hand off to Android's normal install confirmation. This mirrors
-          Android Package Installer's VIEW + INSTALL_PACKAGE registration for APK content while
-          never opening MainActivity.
+          Existing generic package-manager-style path. Keep this exactly as the catch-all APKbox
+          chooser so users can still choose Install / Unattended / Uninstall & reinstall inside the
+          APKbox screen after selecting one resolver entry.
         -->
         <activity
             android:name=".OpenApkInstallerActivity"
@@ -77,6 +76,83 @@
 
             <!-- Some third-party file managers expose APKs as generic binary content. -->
             <intent-filter android:label="Archive &amp; install with APKbox">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Direct resolver choices. Distinct Activity components are intentional: Android can collapse
+          multiple matching intent-filters on one Activity into one resolver row. These tiny routers
+          preserve the incoming URI/grants and open the same APKbox installer with a fixed mode.
+        -->
+        <activity
+            android:name=".OpenApkInstallRouterActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:label="APKbox · Install">
+            <intent-filter android:label="Install with APKbox" android:priority="2">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+            <intent-filter android:label="Install with APKbox" android:priority="2">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".OpenApkUnattendedRouterActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:label="APKbox · Unattended">
+            <intent-filter android:label="Unattended install with APKbox" android:priority="2">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+            <intent-filter android:label="Unattended install with APKbox" android:priority="2">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".OpenApkReinstallRouterActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:label="APKbox · Uninstall &amp; reinstall">
+            <intent-filter android:label="Uninstall &amp; reinstall with Package Installer" android:priority="2">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+            <intent-filter android:label="Uninstall &amp; reinstall with Package Installer" android:priority="2">
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.INSTALL_PACKAGE" />
                 <category android:name="android.intent.category.DEFAULT" />
