@@ -8,14 +8,16 @@ import com.mekromn.apkbox.bridge.BridgeExecutor
 import com.mekromn.apkbox.bridge.BridgePreferences
 import com.mekromn.apkbox.bridge.BridgeStateStore
 import com.mekromn.apkbox.bridge.GitHubRelayClient
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
+import com.mekromn.apkbox.bridge.ShizukuBridgeManager
 import com.mekromn.apkbox.data.AutoScanManager
 import com.mekromn.apkbox.data.LibraryStore
 
 /**
  * Process-local service graph so UI, broadcast receivers, background scanners, build automation,
  * and the remote bridge share one writer/connection and one set of StateFlows. Master restore only
- * resets services that retain vault references; bridge identity and ADB pairing deliberately live
- * independently of the APK vault.
+ * resets services that retain vault references; Shizuku/Sui authorization, bridge identity and ADB
+ * pairing deliberately live independently of the APK vault.
  */
 object ApkBoxServices {
     private val lock = Any()
@@ -25,6 +27,8 @@ object ApkBoxServices {
     @Volatile private var bridgePreferencesInstance: BridgePreferences? = null
     @Volatile private var bridgeStateStoreInstance: BridgeStateStore? = null
     @Volatile private var adbBridgeManagerInstance: AdbBridgeManager? = null
+    @Volatile private var shizukuBridgeManagerInstance: ShizukuBridgeManager? = null
+    @Volatile private var privilegedBridgeManagerInstance: PrivilegedBridgeManager? = null
     @Volatile private var relayClientInstance: GitHubRelayClient? = null
     @Volatile private var bridgeExecutorInstance: BridgeExecutor? = null
     @Volatile private var autonomousPlanRunnerInstance: AutonomousPlanRunner? = null
@@ -61,11 +65,29 @@ object ApkBoxServices {
             }
         }
 
+    /** ADB-specific surface retained for pairing and Wireless ADB self-heal. */
     fun adbBridge(context: Context): AdbBridgeManager =
         adbBridgeManagerInstance ?: synchronized(lock) {
             adbBridgeManagerInstance ?: AdbBridgeManager(context.applicationContext).also {
                 adbBridgeManagerInstance = it
             }
+        }
+
+    fun shizukuBridge(context: Context): ShizukuBridgeManager =
+        shizukuBridgeManagerInstance ?: synchronized(lock) {
+            shizukuBridgeManagerInstance ?: ShizukuBridgeManager(context.applicationContext).also {
+                shizukuBridgeManagerInstance = it
+            }
+        }
+
+    /** Preferred feature surface: Shizuku/Sui first, Wireless ADB peer fallback. */
+    fun privilegedBridge(context: Context): PrivilegedBridgeManager =
+        privilegedBridgeManagerInstance ?: synchronized(lock) {
+            privilegedBridgeManagerInstance ?: PrivilegedBridgeManager(
+                context = context.applicationContext,
+                adb = adbBridge(context.applicationContext),
+                shizuku = shizukuBridge(context.applicationContext),
+            ).also { privilegedBridgeManagerInstance = it }
         }
 
     fun relayClient(): GitHubRelayClient =
@@ -77,7 +99,7 @@ object ApkBoxServices {
         bridgeExecutorInstance ?: synchronized(lock) {
             bridgeExecutorInstance ?: BridgeExecutor(
                 context = context.applicationContext,
-                adb = adbBridge(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
                 stateStore = bridgeStateStore(context.applicationContext),
             ).also { bridgeExecutorInstance = it }
         }
@@ -86,7 +108,7 @@ object ApkBoxServices {
         autonomousPlanRunnerInstance ?: synchronized(lock) {
             autonomousPlanRunnerInstance ?: AutonomousPlanRunner(
                 context = context.applicationContext,
-                adb = adbBridge(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
                 executor = bridgeExecutor(context.applicationContext),
             ).also { autonomousPlanRunnerInstance = it }
         }
@@ -96,7 +118,7 @@ object ApkBoxServices {
             buildRunnerInstance ?: BuildRunner(
                 context = context.applicationContext,
                 library = libraryStore(context.applicationContext),
-                adb = adbBridge(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
             ).also { buildRunnerInstance = it }
         }
 
