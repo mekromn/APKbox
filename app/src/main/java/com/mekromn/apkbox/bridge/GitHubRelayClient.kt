@@ -160,16 +160,19 @@ class GitHubRelayClient {
     suspend fun heartbeat(
         config: BridgeConfig,
         token: String,
-        adbStatus: AdbBridgeStatus,
+        privilegedStatus: PrivilegedBridgeStatus,
     ) = withContext(Dispatchers.IO) {
+        val adbStatus = privilegedStatus.adb
         val json = JSONObject()
-            .put("schema", 4)
+            .put("schema", 5)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
             .put("androidApi", Build.VERSION.SDK_INT)
             .put("androidRelease", Build.VERSION.RELEASE)
             .put("bridgeEnabled", config.enabled)
+            // Legacy ADB fields remain for older agents while the richer privilegedTransport object
+            // is authoritative for current builds.
             .put("adbPaired", config.paired)
             .put("adbConnected", adbStatus.connected)
             .put("adbHealPhase", adbStatus.healPhase.name)
@@ -185,12 +188,17 @@ class GitHubRelayClient {
             .put("allowInformational", config.allowInformational)
             .put("allowPopups", config.allowPopups)
             .put("lastSeenEpochMs", System.currentTimeMillis())
+            // Backward-compatible flat capability names. New agents should use remoteCommandTypes
+            // and advancedWorkflows added by BridgeCapabilityCatalog below.
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
-                "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint", "unattended_adb_install",
-                "conversation_handoff", "wireless_adb_auto_heal"
+                "agent_start", "agent_resume", "agent_status", "build_start", "build_status",
+                "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint",
+                "unattended_verified_install", "privileged_transport_shizuku_sui_or_wireless_adb",
+                "wireless_adb_auto_heal", "wireless_adb_persistent_self_start"
             )))
+        BridgeCapabilityCatalog.enrich(json, config, privilegedStatus)
         val path = "bridge/devices/${config.deviceId}/state.json"
         putJson(config, token, path, json, "APKbox bridge heartbeat")
     }
