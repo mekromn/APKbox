@@ -106,7 +106,7 @@ private fun ApprovalScreen(
                     ) {
                         OutlinedButton(onClick = onDeny, modifier = Modifier.weight(1f)) { Text("Deny") }
                         Button(onClick = onAllowOnce, modifier = Modifier.weight(1f)) {
-                            Text(if (request.type == BridgeCommandType.AGENT_START) "Start plan" else "Allow once")
+                            Text(confirmLabel(request.type))
                         }
                     }
                 }
@@ -146,9 +146,18 @@ private fun ApprovalScreen(
 
             InfoSection("Why ChatGPT wants this", request.reason.ifBlank { "No reason was supplied." })
             InfoSection("Action", requestSummaryForApproval(request))
-            if (request.type == BridgeCommandType.AGENT_START) {
+            if (request.type in setOf(
+                    BridgeCommandType.AGENT_START,
+                    BridgeCommandType.AGENT_RESUME,
+                    BridgeCommandType.AGENT_STATUS,
+                )
+            ) {
                 InfoSection("Run ID", request.runId.ifBlank { "Missing" })
-                InfoSection("Target app", request.packageName.ifBlank { "Missing" })
+                if (request.packageName.isNotBlank()) InfoSection("Target app", request.packageName)
+            }
+            if (request.type in setOf(BridgeCommandType.BUILD_START, BridgeCommandType.BUILD_STATUS)) {
+                InfoSection("Build ID", request.buildId.ifBlank { "Not supplied" })
+                InfoSection("Run ID", request.runId.ifBlank { "Not supplied" })
             }
 
             if (request.command.isNotBlank()) {
@@ -174,8 +183,10 @@ private fun ApprovalScreen(
             )
             Text(
                 when {
-                    request.type == BridgeCommandType.AGENT_START ->
-                        "This approves one bounded autonomous plan for the named app. Plan starts never inherit an earlier trusted session."
+                    request.type in setOf(BridgeCommandType.AGENT_START, BridgeCommandType.AGENT_RESUME) ->
+                        "This approves one bounded autonomous execution for the named run. Plan start/resume never inherit an earlier trusted session."
+                    request.type == BridgeCommandType.BUILD_START ->
+                        "This may download, archive, install, downgrade, launch, and optionally test the exact build candidate described in Continuity. APKbox always requires a fresh on-device approval for BUILD_START."
                     pending.risk == BridgeRisk.READ_ONLY ->
                         "Read-only debugging can be covered by a temporary trusted session."
                     pending.risk == BridgeRisk.DEBUG_ACTION ->
@@ -192,6 +203,13 @@ private fun ApprovalScreen(
             )
         }
     }
+}
+
+private fun confirmLabel(type: BridgeCommandType): String = when (type) {
+    BridgeCommandType.AGENT_START -> "Start plan"
+    BridgeCommandType.AGENT_RESUME -> "Resume plan"
+    BridgeCommandType.BUILD_START -> "Start build"
+    else -> "Allow once"
 }
 
 @Composable
@@ -225,7 +243,7 @@ private fun riskTint(risk: BridgeRisk) = when (risk) {
 }
 
 private fun requestSummaryForApproval(request: BridgeRequest): String = when (request.type) {
-    BridgeCommandType.SHELL -> "Run a shell command through Wireless ADB"
+    BridgeCommandType.SHELL -> "Run a shell command through APKbox's active privileged transport"
     BridgeCommandType.LOGCAT -> "Capture a system logcat snapshot"
     BridgeCommandType.APP_LOGCAT -> "Capture logcat for ${request.packageName}"
     BridgeCommandType.DUMPSYS -> "Capture dumpsys ${request.service}"
@@ -241,5 +259,9 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.UI_TEXT -> "Type text into the foreground ${request.packageName} UI"
     BridgeCommandType.UI_KEY -> "Send Android key code ${request.keyCode} while ${request.packageName} is foreground"
     BridgeCommandType.UI_WAIT -> "Wait for '${request.selector}' in ${request.packageName}"
-    BridgeCommandType.AGENT_START -> "Fetch, validate, and execute bounded autonomous plan '${request.runId}' for ${request.packageName}"
+    BridgeCommandType.AGENT_START -> "Fetch, validate, and execute bounded autonomous plan '${request.runId}'"
+    BridgeCommandType.AGENT_RESUME -> "Resume previously persisted autonomous run '${request.runId}'"
+    BridgeCommandType.AGENT_STATUS -> "Read and republish autonomous checkpoint '${request.runId}'"
+    BridgeCommandType.BUILD_START -> "Fetch, verify, archive, optionally install/launch, and optionally test build '${request.buildId.ifBlank { request.runId }}'"
+    BridgeCommandType.BUILD_STATUS -> "Read and republish build checkpoint '${request.runId.ifBlank { request.buildId }}'"
 }
