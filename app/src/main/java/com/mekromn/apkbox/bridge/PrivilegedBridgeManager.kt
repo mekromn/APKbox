@@ -83,8 +83,6 @@ class PrivilegedBridgeManager(
     )
     val status: StateFlow<PrivilegedBridgeStatus> = _status.asStateFlow()
 
-    @Volatile private var lastSelected = PrivilegedTransportKind.NONE
-
     init {
         scope.launch {
             shizuku.status.collect { updateStatus() }
@@ -130,8 +128,7 @@ class PrivilegedBridgeManager(
         }
         if (granted) {
             repeat(5) {
-                if (hasPersistentWirelessControl()) return@repeat
-                delay(50)
+                if (!hasPersistentWirelessControl()) delay(50)
             }
         }
         updateStatus()
@@ -148,7 +145,7 @@ class PrivilegedBridgeManager(
             PrivilegedTransportKind.WIRELESS_ADB -> adb.execute(command, timeoutSeconds)
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
         }
-        markSelected(transport)
+        updateStatus()
         return result
     }
 
@@ -164,7 +161,7 @@ class PrivilegedBridgeManager(
             PrivilegedTransportKind.WIRELESS_ADB -> adb.executeRaw(command, timeoutSeconds, maxBytes)
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
         }
-        markSelected(transport)
+        updateStatus()
         return result
     }
 
@@ -188,7 +185,7 @@ class PrivilegedBridgeManager(
             )
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
         }
-        markSelected(transport)
+        updateStatus()
         return result.toPrivileged(transport)
     }
 
@@ -204,7 +201,7 @@ class PrivilegedBridgeManager(
             PrivilegedTransportKind.WIRELESS_ADB -> adb.installApk(apkFile, allowDowngrade, onProgress)
             PrivilegedTransportKind.NONE -> error(unavailableMessage())
         }
-        markSelected(transport)
+        updateStatus()
         return result.toPrivileged(transport)
     }
 
@@ -221,7 +218,7 @@ class PrivilegedBridgeManager(
     suspend fun tryStartWirelessDebugging(): Boolean {
         if (adb.ensureConnected()) {
             runCatching { bootstrapPersistentWirelessControl() }
-            markSelected(PrivilegedTransportKind.WIRELESS_ADB)
+            updateStatus()
             return true
         }
 
@@ -229,7 +226,7 @@ class PrivilegedBridgeManager(
             if (writeWirelessDebuggingSetting(true)) {
                 delay(700L)
                 if (adb.autoConnect(timeoutMs = 8_000L)) {
-                    markSelected(PrivilegedTransportKind.WIRELESS_ADB)
+                    updateStatus()
                     return true
                 }
             }
@@ -245,12 +242,12 @@ class PrivilegedBridgeManager(
         if (!enabled) return false
         delay(700L)
         val connected = adb.autoConnect(timeoutMs = 8_000L)
-        if (connected) markSelected(PrivilegedTransportKind.WIRELESS_ADB)
+        updateStatus()
         return connected
     }
 
+    /** Current preferred usable transport, never a stale last-used label. */
     fun activeTransport(): PrivilegedTransportKind = when {
-        lastSelected != PrivilegedTransportKind.NONE -> lastSelected
         shizuku.status.value.usable && shizuku.status.value.root -> PrivilegedTransportKind.SHIZUKU_ROOT
         shizuku.status.value.usable -> PrivilegedTransportKind.SHIZUKU_SHELL
         adb.status.value.connected -> PrivilegedTransportKind.WIRELESS_ADB
@@ -272,6 +269,12 @@ class PrivilegedBridgeManager(
         }.getOrDefault(false)
     }
 
+    /**
+     * Selection is shared by every privileged feature. This is where the persistent Wireless ADB
+     * self-start capability becomes universal: if Shizuku/Sui is absent and an existing paired ADB
+     * server is off, any Screen Agent/build/install/console operation may wake Wireless Debugging and
+     * reconnect before reporting that no transport is available.
+     */
     private suspend fun selectTransport(): PrivilegedTransportKind {
         if (shizuku.ensureReady()) {
             return if (shizuku.status.value.root) {
@@ -281,12 +284,10 @@ class PrivilegedBridgeManager(
             }
         }
         if (adb.ensureConnected()) return PrivilegedTransportKind.WIRELESS_ADB
+        if (hasPersistentWirelessControl() && tryStartWirelessDebugging()) {
+            return PrivilegedTransportKind.WIRELESS_ADB
+        }
         return PrivilegedTransportKind.NONE
-    }
-
-    private fun markSelected(transport: PrivilegedTransportKind) {
-        lastSelected = transport
-        updateStatus()
     }
 
     private fun updateStatus() {
