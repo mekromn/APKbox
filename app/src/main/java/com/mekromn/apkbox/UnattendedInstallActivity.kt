@@ -68,7 +68,7 @@ class UnattendedInstallActivity : ComponentActivity() {
     }
 
     private val libraryStore by lazy { ApkBoxServices.libraryStore(applicationContext) }
-    private val adb by lazy { ApkBoxServices.adbBridge(applicationContext) }
+    private val privileged by lazy { ApkBoxServices.privilegedBridge(applicationContext) }
     private val installer by lazy { ApkInstaller(applicationContext, libraryStore) }
     private val state = MutableStateFlow(UnattendedInstallUiState())
 
@@ -106,14 +106,30 @@ class UnattendedInstallActivity : ComponentActivity() {
             state.value = UnattendedInstallUiState(
                 record = record,
                 phase = "Verifying unattended install",
-                detail = "Checking the installed package and self-healing Wireless ADB connection…",
+                detail = "Checking the installed package and available privileged transports…",
                 busy = true,
             )
 
             try {
-                val bridgeConfig = ApkBoxServices.bridgePreferences(applicationContext).state.value
-                check(bridgeConfig.paired) {
-                    "Wireless ADB has not been paired with APKbox yet. Open Remote Debug Bridge and pair this phone once, then retry."
+                var ready = privileged.ensureReady()
+                if (!ready) {
+                    val shizuku = privileged.shizuku.status.value
+                    if (shizuku.binderAvailable && !shizuku.permissionGranted) {
+                        privileged.requestShizukuPermission()
+                        error("Shizuku is running but APKbox is not authorized yet. Approve the Shizuku permission prompt, then tap Retry.")
+                    }
+
+                    val bridgeConfig = ApkBoxServices.bridgePreferences(applicationContext).state.value
+                    if (bridgeConfig.paired) {
+                        ready = privileged.tryStartWirelessDebugging()
+                    }
+                    check(ready || privileged.ensureReady()) {
+                        if (bridgeConfig.paired) {
+                            "Neither Shizuku/Sui nor Wireless ADB is currently usable. APKbox attempted its Wireless ADB reconnect path. Open Remote Debug Bridge if Android requires Wireless debugging attention."
+                        } else {
+                            "No privileged install transport is ready. Start and authorize Shizuku/Sui, or use Remote Debug Bridge → Auto-open & pair once for Wireless ADB."
+                        }
+                    }
                 }
 
                 val installed = ApkInspector.inspectInstalled(this@UnattendedInstallActivity, record.packageName)
@@ -122,27 +138,28 @@ class UnattendedInstallActivity : ComponentActivity() {
                     !record.signingCertSha256.isNullOrBlank() &&
                     !installed.signingCertSha256.equals(record.signingCertSha256, ignoreCase = true)
                 check(!signingMismatch) {
-                    "Unattended install was blocked because the installed app is signed with a different certificate. APKbox will not silently uninstall it or erase its app data. Use normal Install if you intentionally want the uninstall/reinstall flow."
+                    "Unattended in-place install was blocked because the installed app is signed with a different certificate. Use the dedicated Uninstall & Reinstall mode for intentional signature-conflict replacement."
                 }
 
                 val allowDowngrade = installed?.versionCode?.let { it > record.versionCode } == true
+                val transport = privileged.activeTransportLabel()
                 state.value = state.value.copy(
                     phase = "Opening verified install session",
                     detail = if (allowDowngrade) {
-                        "Older revision detected. APKbox will request an in-place ADB downgrade. The install session will not commit until the complete outgoing APK SHA-256 is verified; no automatic uninstall is allowed."
+                        "Older revision detected. APKbox will request an in-place downgrade through $transport. The install session will not commit until the complete outgoing APK SHA-256 is verified; no automatic uninstall is allowed."
                     } else {
-                        "APKbox will stream the exact archived bytes into an uncommitted Android install session. Android is not allowed to commit until the full outgoing APK SHA-256 is verified."
+                        "APKbox will stream the exact archived bytes through $transport into an uncommitted Android install session. Android is not allowed to commit until the full outgoing APK SHA-256 is verified."
                     },
                 )
 
                 val result = installer.installUnattended(
                     record = record,
-                    adb = adb,
+                    privileged = privileged,
                     allowDowngrade = allowDowngrade,
                     onProgress = { progress ->
                         state.value = state.value.copy(
                             phase = "Installing unattended",
-                            detail = "Streaming exact APK bytes through the self-healing Wireless ADB connection. Commit remains blocked until full SHA-256 verification succeeds…",
+                            detail = "Streaming exact APK bytes through ${privileged.activeTransportLabel()}. Commit remains blocked until full SHA-256 verification succeeds…",
                             progress = progress,
                         )
                     },
@@ -150,7 +167,7 @@ class UnattendedInstallActivity : ComponentActivity() {
 
                 state.value = state.value.copy(
                     phase = "Installed & verified",
-                    detail = "The outgoing APK passed full SHA-256 verification before commit, Android package manager reported success, and the installed base.apk SHA-256 matches the APKbox archive. ${result.durationMs} ms ADB install time.",
+                    detail = "The outgoing APK passed full SHA-256 verification before commit, Android package manager reported success, and the installed base.apk SHA-256 matches the APKbox archive. ${result.durationMs} ms via ${privileged.activeTransportLabel()}.",
                     progress = InstallProgress(record.sizeBytes, record.sizeBytes, directPreparedSource = false),
                     busy = false,
                     success = true,
@@ -169,16 +186,21 @@ class UnattendedInstallActivity : ComponentActivity() {
                     ).show()
                 }
             } catch (failure: Throwable) {
-                val adbStatus = adb.status.value
-                val healHint = when {
-                    adbStatus.userActionRequired -> "\n\nWireless ADB requires attention: ${adbStatus.lastError.ifBlank { "re-enable Wireless debugging or re-pair APKbox." }}"
-                    !adbStatus.wifiAvailable -> "\n\nWireless ADB is waiting for Wi-Fi."
-                    adbStatus.lastError.isNotBlank() -> "\n\nWireless ADB: ${adbStatus.lastError}"
+                val status = privileged.status.value
+                val shizuku = status.shizuku
+                val adb = status.adb
+                val transportHint = when {
+                    shizuku.binderAvailable && !shizuku.permissionGranted ->
+                        "\n\nShizuku is running but APKbox permission is not granted."
+                    shizuku.lastError.isNotBlank() -> "\n\nShizuku/Sui: ${shizuku.lastError}"
+                    adb.userActionRequired -> "\n\nWireless ADB requires attention: ${adb.lastError.ifBlank { "re-enable Wireless debugging or re-pair APKbox." }}"
+                    !adb.wifiAvailable -> "\n\nWireless ADB is waiting for Wi-Fi; Shizuku/Sui can work without Wi-Fi when available."
+                    adb.lastError.isNotBlank() -> "\n\nWireless ADB: ${adb.lastError}"
                     else -> ""
                 }
                 state.value = state.value.copy(
                     phase = "Unattended install stopped",
-                    detail = (failure.message ?: failure.javaClass.simpleName) + healHint,
+                    detail = (failure.message ?: failure.javaClass.simpleName) + transportHint,
                     progress = null,
                     busy = false,
                     success = false,
