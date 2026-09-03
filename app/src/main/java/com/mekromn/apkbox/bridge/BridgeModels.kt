@@ -21,6 +21,10 @@ enum class BridgeCommandType {
     UI_KEY,
     UI_WAIT,
     AGENT_START,
+    AGENT_RESUME,
+    AGENT_STATUS,
+    BUILD_START,
+    BUILD_STATUS,
 }
 
 enum class BridgeRisk {
@@ -59,6 +63,7 @@ data class BridgeRequest(
     val durationMs: Int = 300,
     val keyCode: Int = -1,
     val runId: String = "",
+    val buildId: String = "",
     val sequenceNumber: Long = 0L,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
     val expiresAtEpochMs: Long = System.currentTimeMillis() + 10 * 60_000L,
@@ -68,7 +73,7 @@ data class BridgeRequest(
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean = expiresAtEpochMs in 1 until now
 
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 2)
+        .put("schema", 3)
         .put("id", id)
         .put("type", type.name)
         .put("command", command)
@@ -86,6 +91,7 @@ data class BridgeRequest(
         .put("durationMs", durationMs)
         .put("keyCode", keyCode)
         .put("runId", runId)
+        .put("buildId", buildId)
         .put("sequenceNumber", sequenceNumber)
         .put("createdAtEpochMs", createdAtEpochMs)
         .put("expiresAtEpochMs", expiresAtEpochMs)
@@ -93,11 +99,17 @@ data class BridgeRequest(
         .put("source", source)
 
     companion object {
+        private val idRegex = Regex("[A-Za-z0-9._-]{1,96}")
+
         fun fromJson(json: JSONObject): BridgeRequest {
             val id = json.optString("id").trim()
-            require(id.matches(Regex("[A-Za-z0-9._-]{1,96}"))) { "Invalid bridge request id." }
+            require(idRegex.matches(id)) { "Invalid bridge request id." }
             val type = runCatching { BridgeCommandType.valueOf(json.getString("type").uppercase()) }
                 .getOrElse { error("Unsupported bridge command type.") }
+            val runId = json.optString("runId").trim().take(96)
+            val buildId = json.optString("buildId").trim().take(96)
+            if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
+            if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
             return BridgeRequest(
                 id = id,
                 type = type,
@@ -115,7 +127,8 @@ data class BridgeRequest(
                 endY = json.optInt("endY", -1),
                 durationMs = json.optInt("durationMs", 300).coerceIn(1, 10_000),
                 keyCode = json.optInt("keyCode", -1),
-                runId = json.optString("runId").take(96),
+                runId = runId,
+                buildId = buildId,
                 sequenceNumber = json.optLong("sequenceNumber", 0L).coerceAtLeast(0L),
                 createdAtEpochMs = json.optLong("createdAtEpochMs", System.currentTimeMillis()),
                 expiresAtEpochMs = json.optLong("expiresAtEpochMs", System.currentTimeMillis() + 10 * 60_000L),
@@ -184,7 +197,7 @@ data class BridgeResult(
     val artifacts: List<BridgeArtifact> = emptyList(),
 ) {
     fun toJson(deviceId: String): JSONObject = JSONObject()
-        .put("schema", 2)
+        .put("schema", 3)
         .put("requestId", requestId)
         .put("deviceId", deviceId)
         .put("status", status.name)
