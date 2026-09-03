@@ -1,7 +1,7 @@
 package com.mekromn.apkbox.agent
 
 import android.content.Context
-import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.bridge.ScreenAgentController
 import org.json.JSONObject
 import java.io.File
@@ -27,7 +27,7 @@ data class EvidenceBundle(
 
 class AgentEvidenceCollector(
     context: Context,
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
     private val screen: ScreenAgentController,
     private val checkpointStore: AgentCheckpointStore,
 ) {
@@ -58,6 +58,7 @@ class AgentEvidenceCollector(
                     .put("terminalForStep", decision.terminalForStep)
                     .put("mayRetry", decision.mayRetry)
                     .put("capturedAtEpochMs", capturedAt)
+                    .put("privilegedTransport", privileged.activeTransport().name)
                     .toString(2),
             )
 
@@ -126,7 +127,7 @@ class AgentEvidenceCollector(
             }
 
             val manifest = JSONObject()
-                .put("schema", 1)
+                .put("schema", 2)
                 .put("runId", checkpoint.runId)
                 .put("targetPackage", checkpoint.targetPackage)
                 .put("signal", decision.signal.name)
@@ -140,6 +141,7 @@ class AgentEvidenceCollector(
                 .put("lastResult", checkpoint.lastResult)
                 .put("foregroundPackage", foreground)
                 .put("uiFingerprint", snapshot?.uiFingerprint.orEmpty())
+                .put("privilegedTransport", privileged.activeTransport().name)
             writeText(staging, "manifest.json", manifest.toString(2))
 
             val target = File(root, "$safeRun-$stamp.zip")
@@ -169,7 +171,7 @@ class AgentEvidenceCollector(
     }
 
     private suspend fun shellText(command: String, timeoutSeconds: Int): String = runCatching {
-        val result = adb.execute(command, timeoutSeconds)
+        val result = privileged.execute(command, timeoutSeconds)
         buildString {
             append(result.output)
             if (result.timedOut) append("\n[APKbox: command timed out]")
