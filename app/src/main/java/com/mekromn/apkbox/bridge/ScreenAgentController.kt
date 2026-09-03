@@ -43,7 +43,7 @@ private data class UiNode(
 
 class ScreenAgentController(
     context: Context,
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
 ) {
     companion object {
         const val LOCAL_ARTIFACT_PREFIX = "__APKBOX_LOCAL_ARTIFACT__:"
@@ -59,7 +59,7 @@ class ScreenAgentController(
     private val artifactDir = File(appContext.filesDir, "apkbox-bridge/artifacts").apply { mkdirs() }
 
     suspend fun foregroundPackage(): String {
-        val output = adb.execute("dumpsys activity activities", 8).output
+        val output = privileged.execute("dumpsys activity activities", 8).output
         val patterns = listOf(
             Regex("mResumedActivity:.*? ([A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+)/"),
             Regex("topResumedActivity=.*? ([A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+)/"),
@@ -71,7 +71,7 @@ class ScreenAgentController(
     suspend fun snapshot(requestId: String): ScreenActionResult {
         val safeId = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val remote = "/data/local/tmp/apkbox-ui-$safeId.xml"
-        val shell = adb.execute(
+        val shell = privileged.execute(
             "uiautomator dump --compressed $remote >/dev/null 2>&1; cat $remote; rm -f $remote",
             15,
         )
@@ -87,7 +87,7 @@ class ScreenAgentController(
     }
 
     suspend fun screenshot(requestId: String): ScreenActionResult {
-        val raw = adb.executeRaw("screencap -p", timeoutSeconds = 15)
+        val raw = privileged.executeRaw("screencap -p", timeoutSeconds = 15)
         check(!raw.timedOut) { "Screenshot capture timed out." }
         check(!raw.truncated) { "Screenshot exceeded the raw capture safety limit." }
         check(raw.bytes.size > 128) { "Screenshot capture returned no image." }
@@ -138,7 +138,7 @@ class ScreenAgentController(
         requireCoordinate(x, y)
         requireForeground(packageName)
         val before = snapshot("tap-before-${System.nanoTime()}").uiFingerprint
-        val shell = adb.execute("input tap $x $y", 8)
+        val shell = privileged.execute("input tap $x $y", 8)
         check(shell.exitCode == null || shell.exitCode == 0) { "Tap failed with code ${shell.exitCode}." }
         delay(180)
         val afterPackage = foregroundPackage()
@@ -159,7 +159,7 @@ class ScreenAgentController(
         val node = findNode(before.output, selector)
             ?: error("No enabled UI node matched selector: $selector")
         check(node.right > node.left && node.bottom > node.top) { "Matched UI node has invalid bounds." }
-        val shell = adb.execute("input tap ${node.centerX} ${node.centerY}", 8)
+        val shell = privileged.execute("input tap ${node.centerX} ${node.centerY}", 8)
         check(shell.exitCode == null || shell.exitCode == 0) { "Semantic tap failed with code ${shell.exitCode}." }
         delay(180)
         val afterPackage = foregroundPackage()
@@ -186,7 +186,7 @@ class ScreenAgentController(
         requireCoordinate(startX, startY)
         requireCoordinate(endX, endY)
         requireForeground(packageName)
-        val shell = adb.execute(
+        val shell = privileged.execute(
             "input swipe $startX $startY $endX $endY ${durationMs.coerceIn(1, 10_000)}",
             12,
         )
@@ -208,7 +208,7 @@ class ScreenAgentController(
         requireForeground(packageName)
         require(value.length <= 2_000) { "UI text is too long." }
         val encoded = value.replace("%", "%25").replace(" ", "%s")
-        val shell = adb.execute("input text ${shellQuote(encoded)}", 12)
+        val shell = privileged.execute("input text ${shellQuote(encoded)}", 12)
         check(shell.exitCode == null || shell.exitCode == 0) { "Text input failed with code ${shell.exitCode}." }
         delay(120)
         val afterPackage = foregroundPackage()
@@ -226,7 +226,7 @@ class ScreenAgentController(
     suspend fun key(packageName: String, keyCode: Int): ScreenActionResult {
         require(keyCode in 0..400) { "Invalid Android key code." }
         requireForeground(packageName)
-        val shell = adb.execute("input keyevent $keyCode", 8)
+        val shell = privileged.execute("input keyevent $keyCode", 8)
         check(shell.exitCode == null || shell.exitCode == 0) { "Key event failed with code ${shell.exitCode}." }
         delay(160)
         val afterPackage = foregroundPackage()
