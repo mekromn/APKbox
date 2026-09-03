@@ -21,6 +21,39 @@ data class BridgePopupMessage(
     val requestId: String,
 )
 
+data class BridgeInFlightEnvelope(
+    val request: BridgeRequest,
+    val risk: BridgeRisk,
+    val inboxPath: String,
+    val inboxSha: String,
+    val startedAtEpochMs: Long,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("schema", 1)
+        .put("request", request.toJson())
+        .put("risk", risk.name)
+        .put("inboxPath", inboxPath)
+        .put("inboxSha", inboxSha)
+        .put("startedAtEpochMs", startedAtEpochMs)
+
+    fun completed(result: BridgeResult): BridgeCompletedEnvelope = BridgeCompletedEnvelope(
+        request = request,
+        inboxPath = inboxPath,
+        inboxSha = inboxSha,
+        result = result,
+    )
+
+    companion object {
+        fun fromJson(json: JSONObject): BridgeInFlightEnvelope = BridgeInFlightEnvelope(
+            request = BridgeRequest.fromJson(json.getJSONObject("request")),
+            risk = BridgeRisk.valueOf(json.getString("risk")),
+            inboxPath = json.getString("inboxPath"),
+            inboxSha = json.getString("inboxSha"),
+            startedAtEpochMs = json.optLong("startedAtEpochMs"),
+        )
+    }
+}
+
 class BridgeStateStore(context: Context) {
     companion object {
         private const val MAX_EVENTS = 100
@@ -30,6 +63,7 @@ class BridgeStateStore(context: Context) {
     private val pendingFile = File(root, "pending.json")
     private val popupFile = File(root, "popup.json")
     private val eventsFile = File(root, "events.json")
+    private val inFlightDir = File(root, "inflight").apply { mkdirs() }
     private val completedDir = File(root, "completed").apply { mkdirs() }
 
     private val _events = MutableStateFlow(loadEvents())
@@ -48,6 +82,42 @@ class BridgeStateStore(context: Context) {
     @Synchronized
     fun clearPending() {
         pendingFile.delete()
+    }
+
+    /**
+     * Persist before executing an approved/auto-approved request. This closes the gap between
+     * clearing a pending approval and journaling the final result: the inbox poller can now prove
+     * that the same request is already executing and will never launch a duplicate copy.
+     */
+    @Synchronized
+    fun saveInFlight(pending: BridgePendingRequest, startedAtEpochMs: Long = System.currentTimeMillis()) {
+        val envelope = BridgeInFlightEnvelope(
+            request = pending.request,
+            risk = pending.risk,
+            inboxPath = pending.inboxPath,
+            inboxSha = pending.inboxSha,
+            startedAtEpochMs = startedAtEpochMs,
+        )
+        atomicWrite(inFlightFile(pending.request.id), envelope.toJson().toString())
+    }
+
+    @Synchronized
+    fun loadInFlight(): List<BridgeInFlightEnvelope> = inFlightDir.listFiles()
+        .orEmpty()
+        .asSequence()
+        .filter { it.isFile && it.extension == "json" }
+        .sortedBy { it.lastModified() }
+        .mapNotNull { file ->
+            runCatching { BridgeInFlightEnvelope.fromJson(JSONObject(file.readText())) }.getOrNull()
+        }
+        .toList()
+
+    @Synchronized
+    fun hasInFlight(requestId: String): Boolean = inFlightFile(requestId).isFile
+
+    @Synchronized
+    fun clearInFlight(requestId: String) {
+        inFlightFile(requestId).delete()
     }
 
     @Synchronized
@@ -149,8 +219,12 @@ class BridgeStateStore(context: Context) {
         atomicWrite(eventsFile, array.toString())
     }
 
-    private fun completedFile(requestId: String) =
-        File(completedDir, requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".json")
+    private fun safeName(requestId: String): String =
+        requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".json"
+
+    private fun inFlightFile(requestId: String) = File(inFlightDir, safeName(requestId))
+
+    private fun completedFile(requestId: String) = File(completedDir, safeName(requestId))
 
     private fun atomicWrite(target: File, text: String) {
         target.parentFile?.mkdirs()
