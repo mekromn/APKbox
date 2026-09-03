@@ -2,7 +2,7 @@ package com.mekromn.apkbox.agent
 
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.bridge.ScreenAgentController
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -11,6 +11,9 @@ import kotlin.math.sqrt
  * Collects the smallest live Android state needed by AgentOracle. This intentionally does not make
  * recovery decisions; it only observes. Visual sampling is performed directly from `screencap -p`
  * without creating a relay artifact, so routine watchdog samples do not churn storage or GitHub.
+ *
+ * The legacy OracleObservation.adbConnected field now means "a privileged shell transport is
+ * available" for schema compatibility; either Shizuku/Sui or Wireless ADB satisfies it.
  */
 data class CollectedAgentObservation(
     val observation: OracleObservation,
@@ -21,7 +24,7 @@ data class CollectedAgentObservation(
 )
 
 class AgentObservationCollector(
-    private val adb: AdbBridgeManager,
+    private val privileged: PrivilegedBridgeManager,
     private val screen: ScreenAgentController,
 ) {
     suspend fun collect(
@@ -35,7 +38,7 @@ class AgentObservationCollector(
         includeVisualStats: Boolean = true,
     ): CollectedAgentObservation {
         val now = System.currentTimeMillis()
-        val connected = adb.status.value.connected || runCatching { adb.ensureConnected() }.getOrDefault(false)
+        val connected = runCatching { privileged.ensureReady() }.getOrDefault(false)
         if (!connected) {
             return CollectedAgentObservation(
                 observation = OracleObservation(
@@ -61,7 +64,7 @@ class AgentObservationCollector(
         }
 
         val target = safePackage(checkpoint.targetPackage)
-        val pid = runCatching { adb.execute("pidof $target", 6).output.trim() }.getOrDefault("")
+        val pid = runCatching { privileged.execute("pidof $target", 6).output.trim() }.getOrDefault("")
         val processAlive = pid.split(Regex("\\s+")).any { it.matches(Regex("\\d+")) }
         val foreground = runCatching { screen.foregroundPackage() }.getOrDefault("")
         val snapshot = runCatching { screen.snapshot("watchdog-${sanitize(checkpoint.runId)}-${now}") }.getOrNull()
@@ -97,7 +100,7 @@ class AgentObservationCollector(
     }
 
     private suspend fun collectVisualStats(): VisualStats = runCatching {
-        val raw = adb.executeRaw("screencap -p", timeoutSeconds = 10)
+        val raw = privileged.executeRaw("screencap -p", timeoutSeconds = 10)
         if (raw.timedOut || raw.truncated || raw.bytes.size < 128) return@runCatching VisualStats(null, null, 0, 0)
         val bitmap = BitmapFactory.decodeByteArray(raw.bytes, 0, raw.bytes.size)
             ?: return@runCatching VisualStats(null, null, 0, 0)
