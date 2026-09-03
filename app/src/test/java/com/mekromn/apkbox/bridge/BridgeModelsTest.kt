@@ -25,6 +25,36 @@ class BridgeModelsTest {
     }
 
     @Test
+    fun advancedRequestRoundTripPreservesRunAndBuildIdentity() {
+        val original = BridgeRequest(
+            id = "build-start-001",
+            type = BridgeCommandType.BUILD_START,
+            packageName = "com.example.camera",
+            runId = "build-run-42",
+            buildId = "candidate-42",
+            reason = "Install exact candidate and launch it",
+            createdAtEpochMs = 1000L,
+            expiresAtEpochMs = 2000L,
+        )
+        assertEquals(original, BridgeRequest.fromJson(original.toJson()))
+    }
+
+    @Test
+    fun invalidAdvancedIdsAreRejectedDuringParsing() {
+        val badRun = JSONObject()
+            .put("id", "valid-id")
+            .put("type", "AGENT_STATUS")
+            .put("runId", "../bad")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badRun) }
+
+        val badBuild = JSONObject()
+            .put("id", "valid-id")
+            .put("type", "BUILD_START")
+            .put("buildId", "candidate/../../bad")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badBuild) }
+    }
+
+    @Test
     fun resultRoundTripPreservesLargeDebugOutputMetadata() {
         val result = BridgeResult(
             requestId = "logcat-002",
