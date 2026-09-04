@@ -119,13 +119,40 @@ class BridgePolicyTest {
 
     @Test
     fun informationalMessagesRespectIndependentPopupToggle() {
-        val notification = request(BridgeCommandType.NOTIFICATION, message = "test")
-        val popup = request(BridgeCommandType.POPUP, message = "test")
+        val nonBlocking = listOf(
+            BridgeCommandType.TOAST,
+            BridgeCommandType.NOTIFICATION,
+            BridgeCommandType.MESSAGE_HEADS_UP,
+        )
+        val intrusive = listOf(
+            BridgeCommandType.POPUP,
+            BridgeCommandType.MESSAGE_SMALL_POPUP,
+            BridgeCommandType.MESSAGE_ALWAYS_ON_TOP,
+            BridgeCommandType.MESSAGE_FULL_WINDOW,
+            BridgeCommandType.PICTURE_MESSAGE,
+        )
 
-        assertFalse(BridgePolicy.mayAutoExecute(notification, 0L, false, false, now))
-        assertTrue(BridgePolicy.mayAutoExecute(notification, 0L, true, false, now))
-        assertFalse(BridgePolicy.mayAutoExecute(popup, 0L, true, false, now))
-        assertTrue(BridgePolicy.mayAutoExecute(popup, 0L, true, true, now))
+        (nonBlocking + intrusive).forEach { type ->
+            assertEquals(BridgeRisk.INFO, BridgePolicy.classify(request(type, message = "test")))
+            assertFalse(BridgePolicy.mayAutoExecute(request(type, message = "test"), 0L, false, false, now))
+        }
+
+        nonBlocking.forEach { type ->
+            assertTrue(
+                "$type should only require informational permission",
+                BridgePolicy.mayAutoExecute(request(type, message = "test"), 0L, true, false, now),
+            )
+        }
+        intrusive.forEach { type ->
+            assertFalse(
+                "$type should remain blocked when popup permission is off",
+                BridgePolicy.mayAutoExecute(request(type, message = "test"), 0L, true, false, now),
+            )
+            assertTrue(
+                "$type should run when both informational and popup permissions are enabled",
+                BridgePolicy.mayAutoExecute(request(type, message = "test"), 0L, true, true, now),
+            )
+        }
     }
 
     @Test
