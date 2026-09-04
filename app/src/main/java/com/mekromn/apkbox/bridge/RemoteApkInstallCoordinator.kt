@@ -169,6 +169,8 @@ class RemoteApkInstallCoordinator(
                 .put("savedToProject", record != null)
                 .put("projectId", record?.projectId.orEmpty())
                 .put("apkRecordId", record?.id.orEmpty())
+                .put("archiveTitle", record?.title.orEmpty())
+                .put("archiveDescription", record?.description.orEmpty())
                 .put("transport", privileged.activeTransportLabel())
                 .put("launched", request.autoLaunch)
                 .toString(2)
@@ -203,12 +205,25 @@ class RemoteApkInstallCoordinator(
         if (project != null) {
             library.records.value.firstOrNull {
                 it.projectId == project.id && it.sha256.equals(sha256, ignoreCase = true)
-            }?.let { return@withContext it }
+            }?.let { existing ->
+                if (request.archiveTitle.isNotBlank() || request.archiveDescription.isNotBlank()) {
+                    library.updateRecordDetails(
+                        recordId = existing.id,
+                        title = request.archiveTitle.ifBlank { existing.title },
+                        description = request.archiveDescription.ifBlank { existing.description },
+                        notes = existing.notes,
+                    )
+                    return@withContext library.records.value.first { it.id == existing.id }
+                }
+                return@withContext existing
+            }
 
             return@withContext library.importRevision(
                 projectId = project.id,
                 uri = Uri.fromFile(apkFile),
                 displayNameOverride = request.displayName.ifBlank { apkFile.name },
+                title = request.archiveTitle,
+                description = request.archiveDescription,
             ).record
         }
 
@@ -216,6 +231,8 @@ class RemoteApkInstallCoordinator(
             uri = Uri.fromFile(apkFile),
             projectName = request.projectName.ifBlank { archiveLabel.ifBlank { packageName } },
             displayNameOverride = request.displayName.ifBlank { apkFile.name },
+            title = request.archiveTitle,
+            description = request.archiveDescription,
         ).record
     }
 
