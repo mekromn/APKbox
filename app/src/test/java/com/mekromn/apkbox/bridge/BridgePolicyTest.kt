@@ -76,6 +76,14 @@ class BridgePolicyTest {
     }
 
     @Test
+    fun remoteApkUrlInstallIsAlwaysMutatingAndNeedsFreshApproval() {
+        val install = request(BridgeCommandType.APK_INSTALL_URL)
+        assertEquals(BridgeRisk.MUTATING, BridgePolicy.classify(install))
+        assertFalse(BridgePolicy.mayAutoExecute(install, trustedUntil, true, true, now))
+        assertFalse(BridgePolicy.trustedSessionEligible(install))
+    }
+
+    @Test
     fun autonomousStartAndResumeNeverInheritTrustedSession() {
         listOf(BridgeCommandType.AGENT_START, BridgeCommandType.AGENT_RESUME).forEach { type ->
             val request = request(type, packageName = "com.example.app", runId = "camera-run-42")
