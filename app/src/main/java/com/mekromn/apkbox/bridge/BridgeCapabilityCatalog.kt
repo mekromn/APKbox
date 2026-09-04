@@ -11,9 +11,9 @@ import org.json.JSONObject
  * verb merely because APKbox has a local UI for the same capability.
  */
 object BridgeCapabilityCatalog {
-    const val PROTOCOL_VERSION = 3
-    const val CAPABILITY_SCHEMA = 2
-    const val SKILL_REVISION = "2026-09-03.2"
+    const val PROTOCOL_VERSION = 4
+    const val CAPABILITY_SCHEMA = 3
+    const val SKILL_REVISION = "2026-09-04.1"
     const val SKILL_REPOSITORY = "mekromn/Continuity"
     const val SKILL_PATH = "skills/apkbox-remote-bridge/SKILL.md"
     const val PROTOCOL_PATH = "bridge/README.md"
@@ -53,6 +53,27 @@ object BridgeCapabilityCatalog {
             .put("remoteCommandTypes", JSONArray().apply {
                 BridgeCommandType.values().forEach { put(it.name) }
             })
+            .put("messagePresentation", JSONObject()
+                .put("securityApprovalStyle", config.approvalPresentation.name)
+                .put("legacyDefault", config.messagePresentation.name)
+                .put("agentStructuredChoices", JSONArray(listOf(
+                    "TOAST",
+                    "MESSAGE_HEADS_UP",
+                    "MESSAGE_SMALL_POPUP",
+                    "MESSAGE_ALWAYS_ON_TOP",
+                    "MESSAGE_FULL_WINDOW",
+                    "PICTURE_MESSAGE"
+                )))
+                .put("guidance", JSONObject()
+                    .put("TOAST", "Tiny acknowledgement or transient success/failure confirmation.")
+                    .put("MESSAGE_HEADS_UP", "Non-blocking status/update that benefits from expandable detail.")
+                    .put("MESSAGE_SMALL_POPUP", "Short actionable prompt that should be noticed without taking over the screen.")
+                    .put("MESSAGE_ALWAYS_ON_TOP", "Must-see instruction that should remain visible over the current app until dismissed.")
+                    .put("MESSAGE_FULL_WINDOW", "Detailed multi-step instruction or important message that deserves the whole screen.")
+                    .put("PICTURE_MESSAGE", "Use when an image materially improves understanding; imagePath must be in this device's private Continuity artifacts/message-assets subtree."))
+                .put("intrusiveChoicesRequireAllowPopups", true)
+                .put("overlayPermissionRequiredForFloatingChoices", true)
+                .put("pictureMaxBytes", 8 * 1024 * 1024))
             .put("uiSelectors", JSONObject()
                 .put("formats", JSONArray(listOf(
                     "id:<resource-id>",
@@ -88,6 +109,9 @@ object BridgeCapabilityCatalog {
                 "wireless_adb_pairing_assistant",
                 "ui_automation_package_guarded",
                 "relay_screenshot_preview",
+                "agent_selected_rich_message_presentations",
+                "always_on_top_security_approval_overlay",
+                "private_picture_messages",
                 "autonomous_plan_runner",
                 "oracle_watchdog_and_evidence",
                 "build_download_verify_archive_install_launch",
@@ -105,10 +129,13 @@ object BridgeCapabilityCatalog {
                 .put("planRetriesPerStepMax", 10)
                 .put("uiCoordinateMax", 20000)
                 .put("uiTextCharsMax", 2000)
-                .put("requestIdCharsMax", 96))
+                .put("requestIdCharsMax", 96)
+                .put("pictureMessageBytesMax", 8 * 1024 * 1024))
             .put("securityContract", JSONObject()
                 .put("deviceComputesRisk", true)
                 .put("relayCannotLowerRisk", true)
+                .put("approvalPresentationIsLocalOnly", true)
+                .put("popupOnlyApprovalFallsBackToNotificationIfOverlayUnavailable", true)
                 .put("mutatingAlwaysNeedsFreshApproval", true)
                 .put("dangerousAlwaysNeedsFreshApproval", true)
                 .put("advancedStartResumeNeedsFreshApproval", true)
@@ -120,6 +147,7 @@ object BridgeCapabilityCatalog {
                 .put("atMostOnceJournal", true))
             .put("knownLimitations", JSONArray(listOf(
                 "Relay SCREENSHOT is currently a scaled JPEG preview, not an exact forensic capture.",
+                "Always-on-top security/message overlays require the user's Android Draw over other apps grant; notification fallback is used when unavailable.",
                 "Wireless ADB still requires Android Wi-Fi/trusted-network policy when Shizuku/Sui is unavailable.",
                 "Local signature-conflict reinstall is not exposed as a remote bridge command."
             )))
