@@ -63,7 +63,8 @@ class BridgeMessageDisplaySettingsActivity : ComponentActivity() {
                     overlayGranted = canOverlay,
                     status = status,
                     onBack = { finish() },
-                    onMode = prefs::setMessagePresentation,
+                    onApprovalMode = prefs::setApprovalPresentation,
+                    onLegacyMode = prefs::setMessagePresentation,
                     onKeepNotificationCopy = prefs::setKeepNotificationCopy,
                     onGrantOverlay = ::openOverlayPermission,
                     onPreview = ::previewCurrentMode,
@@ -78,7 +79,7 @@ class BridgeMessageDisplaySettingsActivity : ComponentActivity() {
     }
 
     private fun refreshOverlayPermission() {
-        overlayGranted.value = BridgeOverlayController.canDraw(this)
+        overlayGranted.value = Settings.canDrawOverlays(this)
     }
 
     private fun openOverlayPermission() {
@@ -101,7 +102,7 @@ class BridgeMessageDisplaySettingsActivity : ComponentActivity() {
                     id = "local-display-preview-${System.currentTimeMillis()}",
                     type = BridgeCommandType.NOTIFICATION,
                     title = "APKbox bridge preview",
-                    message = "This is how ChatGPT bridge messages will appear with your current display setting.",
+                    message = "This is how legacy ChatGPT NOTIFICATION/POPUP messages will appear with your current default setting.",
                     reason = "Local bridge message presentation preview",
                     source = "APKbox local settings",
                 ),
@@ -119,7 +120,8 @@ private fun BridgeMessageDisplaySettingsScreen(
     overlayGranted: Boolean,
     status: String,
     onBack: () -> Unit,
-    onMode: (BridgeMessagePresentation) -> Unit,
+    onApprovalMode: (BridgeApprovalPresentation) -> Unit,
+    onLegacyMode: (BridgeMessagePresentation) -> Unit,
     onKeepNotificationCopy: (Boolean) -> Unit,
     onGrantOverlay: () -> Unit,
     onPreview: () -> Unit,
@@ -130,9 +132,9 @@ private fun BridgeMessageDisplaySettingsScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Bridge message display", fontWeight = FontWeight.Bold)
+                        Text("Bridge presentation", fontWeight = FontWeight.Bold)
                         Text(
-                            "Choose how ChatGPT gets your attention",
+                            "Security approvals and agent-selected messages",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -151,7 +153,7 @@ private fun BridgeMessageDisplaySettingsScreen(
                     onClick = onPreview,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 ) {
-                    Text("Preview current mode")
+                    Text("Preview legacy message default")
                 }
             }
         },
@@ -164,17 +166,92 @@ private fun BridgeMessageDisplaySettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Text("Security approval prompts", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
-                "ChatGPT NOTIFICATION and POPUP requests use this local presentation preference. TOAST requests remain short Android toasts. Command-approval prompts always keep their independent persistent high-priority notification so an overlay can never become the only approval path.",
+                "This controls the prompts that ask you to Deny, Allow once, or Allow + trust for ChatGPT bridge actions. The always-on-top option replaces the separate approval notification whenever Android's overlay permission is available.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            BridgeApprovalPresentation.entries.forEach { mode ->
+                ChoiceCard(
+                    title = mode.displayName,
+                    description = mode.description,
+                    selected = config.approvalPresentation == mode,
+                    onClick = { onApprovalMode(mode) },
+                )
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            Text("Overlay permission", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = if (overlayGranted) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (overlayGranted) "Draw over other apps: ready" else "Draw over other apps: permission required",
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        if (overlayGranted) {
+                            "APKbox can show security approvals, compact floating messages, and persistent always-on-top messages above the current app."
+                        } else {
+                            "Until this one-time Android permission is granted, security popup mode and agent overlay messages automatically fall back to notifications so nothing becomes invisible."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (!overlayGranted) {
+                        OutlinedButton(onClick = onGrantOverlay, modifier = Modifier.fillMaxWidth()) {
+                            Text("Allow draw over other apps")
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            Text("Agent-selected message toolkit", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "When Informational messages are allowed, agents can choose the least intrusive useful structured presentation: TOAST, MESSAGE_HEADS_UP, MESSAGE_SMALL_POPUP, MESSAGE_ALWAYS_ON_TOP, MESSAGE_FULL_WINDOW, or PICTURE_MESSAGE. Intrusive popup/window/picture formats also honor the separate Instruction popups permission. Picture images are fetched only from this device's private Continuity artifacts/message-assets paths.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Agent can choose", fontWeight = FontWeight.SemiBold)
+                    Text("• Toast · tiny transient acknowledgement", style = MaterialTheme.typography.bodySmall)
+                    Text("• Heads-up · expandable notification banner", style = MaterialTheme.typography.bodySmall)
+                    Text("• Small popup · compact auto-dismiss floating card", style = MaterialTheme.typography.bodySmall)
+                    Text("• Always on top · persistent floating card", style = MaterialTheme.typography.bodySmall)
+                    Text("• Full window · detailed instruction/message screen", style = MaterialTheme.typography.bodySmall)
+                    Text("• Picture · private image + caption in full-window viewer", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            Text("Legacy NOTIFICATION / POPUP default", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Older agents/scripts that still send generic NOTIFICATION or POPUP use this local default. New agents should prefer the explicit presentation verbs above.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             BridgeMessagePresentation.entries.forEach { mode ->
-                PresentationChoice(
-                    mode = mode,
+                ChoiceCard(
+                    title = mode.displayName,
+                    description = mode.description,
                     selected = config.messagePresentation == mode,
-                    onClick = { onMode(mode) },
+                    onClick = { onLegacyMode(mode) },
                 )
             }
 
@@ -183,12 +260,11 @@ private fun BridgeMessageDisplaySettingsScreen(
                     BridgeMessagePresentation.ALWAYS_ON_TOP,
                 )
             ) {
-                HorizontalDivider()
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).padding(end = 12.dp)) {
                         Text("Keep notification copy", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Also leave the message in the notification shade after showing the popup.",
+                            "Also leave legacy popup messages in the notification shade.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -197,44 +273,6 @@ private fun BridgeMessageDisplaySettingsScreen(
                         checked = config.keepNotificationCopy,
                         onCheckedChange = onKeepNotificationCopy,
                     )
-                }
-            }
-
-            if (config.messagePresentation == BridgeMessagePresentation.ALWAYS_ON_TOP) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = if (overlayGranted) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHigh
-                    },
-                ) {
-                    Column(
-                        Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            if (overlayGranted) "Always-on-top permission ready" else "Draw over other apps permission required",
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            if (overlayGranted) {
-                                "Bridge messages can now appear above whatever app is currently open and remain there until dismissed."
-                            } else {
-                                "Android requires a one-time special permission for true always-on-top windows. Until granted, APKbox automatically falls back to a heads-up notification so messages are never silently lost."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        if (!overlayGranted) {
-                            OutlinedButton(
-                                onClick = onGrantOverlay,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text("Allow draw over other apps")
-                            }
-                        }
-                    }
                 }
             }
 
@@ -252,8 +290,9 @@ private fun BridgeMessageDisplaySettingsScreen(
 }
 
 @Composable
-private fun PresentationChoice(
-    mode: BridgeMessagePresentation,
+private fun ChoiceCard(
+    title: String,
+    description: String,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
@@ -269,9 +308,9 @@ private fun PresentationChoice(
         ) {
             RadioButton(selected = selected, onClick = onClick)
             Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                Text(mode.displayName, fontWeight = FontWeight.SemiBold)
+                Text(title, fontWeight = FontWeight.SemiBold)
                 Text(
-                    mode.description,
+                    description,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
