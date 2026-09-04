@@ -4,7 +4,9 @@ import android.content.Context
 import com.mekromn.apkbox.agent.AutonomousPlanRunner
 import com.mekromn.apkbox.agent.BuildRunner
 import com.mekromn.apkbox.artifacts.ArtifactIngestor
+import com.mekromn.apkbox.artifacts.ArtifactSourceResolver
 import com.mekromn.apkbox.bridge.AdbBridgeManager
+import com.mekromn.apkbox.bridge.ApkRetrievalCoordinator
 import com.mekromn.apkbox.bridge.BridgeExecutor
 import com.mekromn.apkbox.bridge.BridgeInventoryCoordinator
 import com.mekromn.apkbox.bridge.BridgePreferences
@@ -39,8 +41,10 @@ object ApkBoxServices {
     @Volatile private var buildRunnerInstance: BuildRunner? = null
     @Volatile private var durableJobEngineInstance: DurableJobEngine? = null
     @Volatile private var artifactIngestorInstance: ArtifactIngestor? = null
+    @Volatile private var artifactSourceResolverInstance: ArtifactSourceResolver? = null
     @Volatile private var remoteApkInstallInstance: RemoteApkInstallCoordinator? = null
     @Volatile private var inventoryCoordinatorInstance: BridgeInventoryCoordinator? = null
+    @Volatile private var apkRetrievalCoordinatorInstance: ApkRetrievalCoordinator? = null
 
     fun libraryStore(context: Context): LibraryStore =
         libraryStoreInstance ?: synchronized(lock) {
@@ -98,11 +102,6 @@ object ApkBoxServices {
             ).also { privilegedBridgeManagerInstance = it }
         }
 
-    /**
-     * Non-creating peek used only by compatibility/status plumbing. It never creates a privileged
-     * transport behind the user's back; callers fall back to the information they already have when
-     * no manager has been initialized in this process.
-     */
     fun existingPrivilegedBridge(): PrivilegedBridgeManager? = privilegedBridgeManagerInstance
 
     fun durableJobs(context: Context): DurableJobEngine =
@@ -119,6 +118,17 @@ object ApkBoxServices {
             }
         }
 
+    fun artifactSourceResolver(context: Context): ArtifactSourceResolver =
+        artifactSourceResolverInstance ?: synchronized(lock) {
+            artifactSourceResolverInstance ?: ArtifactSourceResolver(
+                context = context.applicationContext,
+                artifacts = artifacts(context.applicationContext),
+                library = libraryStore(context.applicationContext),
+                jobs = durableJobs(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
+            ).also { artifactSourceResolverInstance = it }
+        }
+
     fun relayClient(): GitHubRelayClient =
         relayClientInstance ?: synchronized(lock) {
             relayClientInstance ?: GitHubRelayClient().also { relayClientInstance = it }
@@ -132,6 +142,7 @@ object ApkBoxServices {
                 privileged = privilegedBridge(context.applicationContext),
                 jobs = durableJobs(context.applicationContext),
                 artifacts = artifacts(context.applicationContext),
+                resolver = artifactSourceResolver(context.applicationContext),
             ).also { remoteApkInstallInstance = it }
         }
 
@@ -143,6 +154,18 @@ object ApkBoxServices {
                 privileged = privilegedBridge(context.applicationContext),
                 jobs = durableJobs(context.applicationContext),
             ).also { inventoryCoordinatorInstance = it }
+        }
+
+    fun apkRetrievalCoordinator(context: Context): ApkRetrievalCoordinator =
+        apkRetrievalCoordinatorInstance ?: synchronized(lock) {
+            apkRetrievalCoordinatorInstance ?: ApkRetrievalCoordinator(
+                context = context.applicationContext,
+                library = libraryStore(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
+                jobs = durableJobs(context.applicationContext),
+                resolver = artifactSourceResolver(context.applicationContext),
+                relay = relayClient(),
+            ).also { apkRetrievalCoordinatorInstance = it }
         }
 
     fun bridgeExecutor(context: Context): BridgeExecutor =
@@ -171,6 +194,7 @@ object ApkBoxServices {
                 privileged = privilegedBridge(context.applicationContext),
                 jobs = durableJobs(context.applicationContext),
                 artifacts = artifacts(context.applicationContext),
+                resolver = artifactSourceResolver(context.applicationContext),
             ).also { buildRunnerInstance = it }
         }
 
@@ -181,6 +205,8 @@ object ApkBoxServices {
             buildRunnerInstance = null
             remoteApkInstallInstance = null
             inventoryCoordinatorInstance = null
+            apkRetrievalCoordinatorInstance = null
+            artifactSourceResolverInstance = null
             libraryStoreInstance = null
         }
     }
