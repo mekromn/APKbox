@@ -117,6 +117,13 @@ class BridgeModelsTest {
             .put("downloadUrl", "https://example.com/app.apk")
             .put("expectedApkSha256", "deadbeef")
         assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badSha) }
+
+        val overlongSha = JSONObject()
+            .put("id", "install-url-005")
+            .put("type", "APK_INSTALL_URL")
+            .put("downloadUrl", "https://example.com/app.apk")
+            .put("expectedApkSha256", "a".repeat(65))
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(overlongSha) }
     }
 
     @Test
