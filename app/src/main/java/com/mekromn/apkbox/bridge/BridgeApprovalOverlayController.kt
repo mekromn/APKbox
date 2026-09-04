@@ -86,7 +86,7 @@ object BridgeApprovalOverlayController {
         val dark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
 
-        val background = if (dark) Color.rgb(31, 31, 35) else Color.rgb(250, 249, 255)
+        val cardColor = if (dark) Color.rgb(31, 31, 35) else Color.rgb(250, 249, 255)
         val textPrimary = if (dark) Color.WHITE else Color.rgb(28, 28, 32)
         val textSecondary = if (dark) Color.rgb(220, 220, 228) else Color.rgb(72, 72, 80)
         val accent = when (pending.risk) {
@@ -107,7 +107,7 @@ object BridgeApprovalOverlayController {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(28).toFloat()
-                setColor(background)
+                setColor(cardColor)
                 setStroke(dp(2), accent)
             }
             elevation = dp(24).toFloat()
@@ -164,12 +164,13 @@ object BridgeApprovalOverlayController {
             setLineSpacing(0f, 1.07f)
             setTextIsSelectable(true)
         }
-        card.addView(ScrollView(context).apply {
-            addView(detailText)
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(300),
-        ))
+        card.addView(
+            ScrollView(context).apply { addView(detailText) },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(300),
+            ),
+        )
 
         card.addView(TextView(context).apply {
             text = policyText(pending)
@@ -263,7 +264,7 @@ object BridgeApprovalOverlayController {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.FILL
-            title = "APKbox Bridge Security Approval"
+            this.title = "APKbox Bridge Security Approval"
         }
 
         return runCatching {
