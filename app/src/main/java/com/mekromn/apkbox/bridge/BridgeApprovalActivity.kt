@@ -159,6 +159,9 @@ private fun ApprovalScreen(
                 InfoSection("Build ID", request.buildId.ifBlank { "Not supplied" })
                 InfoSection("Run ID", request.runId.ifBlank { "Not supplied" })
             }
+            if (request.imagePath.isNotBlank()) {
+                InfoSection("Private Continuity image", request.imagePath)
+            }
 
             if (request.command.isNotBlank()) {
                 Surface(
@@ -192,7 +195,7 @@ private fun ApprovalScreen(
                     pending.risk == BridgeRisk.DEBUG_ACTION ->
                         "Package-scoped debug actions can be covered by a temporary trusted session when the action is eligible."
                     pending.risk == BridgeRisk.INFO ->
-                        "This is informational only and does not receive shell privileges."
+                        "This is informational only and does not receive shell privileges. Intrusive message surfaces still obey your local Informational messages / Instruction popups policy."
                     pending.risk == BridgeRisk.MUTATING ->
                         "This can change device or app state. APKbox never auto-approves it."
                     else ->
@@ -248,9 +251,14 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.APP_LOGCAT -> "Capture logcat for ${request.packageName}"
     BridgeCommandType.DUMPSYS -> "Capture dumpsys ${request.service}"
     BridgeCommandType.LAUNCH -> "Launch ${request.packageName}"
-    BridgeCommandType.TOAST -> "Show a toast message on your phone"
-    BridgeCommandType.NOTIFICATION -> "Post a notification on your phone"
-    BridgeCommandType.POPUP -> "Show a ChatGPT instruction popup"
+    BridgeCommandType.TOAST -> "Show a short Android toast message"
+    BridgeCommandType.NOTIFICATION -> "Show a bridge message using the phone's legacy/default presentation"
+    BridgeCommandType.POPUP -> "Show a bridge popup using the phone's legacy/default presentation"
+    BridgeCommandType.MESSAGE_SMALL_POPUP -> "Show a compact auto-dismissing floating popup"
+    BridgeCommandType.MESSAGE_ALWAYS_ON_TOP -> "Show a persistent always-on-top floating message"
+    BridgeCommandType.MESSAGE_FULL_WINDOW -> "Open a full-window APKbox message"
+    BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up notification"
+    BridgeCommandType.PICTURE_MESSAGE -> "Fetch and show a private Continuity image with title/caption"
     BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy${request.packageName.takeIf { it.isNotBlank() }?.let { " for $it" }.orEmpty()}"
     BridgeCommandType.SCREENSHOT -> "Capture the current screen as a private Continuity artifact"
     BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) inside ${request.packageName}"
