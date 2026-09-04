@@ -21,6 +21,10 @@ enum class BridgeCommandType {
     MESSAGE_HEADS_UP,
     PICTURE_MESSAGE,
 
+    // One-request remote APK download + unattended install. This is intentionally separate from
+    // BUILD_START so BuildRunner can retain its stricter candidate-manifest + exact-SHA contract.
+    APK_INSTALL_URL,
+
     UI_SNAPSHOT,
     SCREENSHOT,
     UI_TAP,
@@ -66,6 +70,15 @@ data class BridgeRequest(
     val selector: String = "",
     val value: String = "",
     val imagePath: String = "",
+    val downloadUrl: String = "",
+    val expectedApkSha256: String = "",
+    val saveToProject: Boolean = false,
+    val projectId: String = "",
+    val projectName: String = "",
+    val displayName: String = "",
+    val requiresBuildToken: Boolean = false,
+    val allowDowngrade: Boolean = false,
+    val autoLaunch: Boolean = false,
     val x: Int = -1,
     val y: Int = -1,
     val endX: Int = -1,
@@ -83,7 +96,7 @@ data class BridgeRequest(
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean = expiresAtEpochMs in 1 until now
 
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 4)
+        .put("schema", 5)
         .put("id", id)
         .put("type", type.name)
         .put("command", command)
@@ -95,6 +108,15 @@ data class BridgeRequest(
         .put("selector", selector)
         .put("value", value)
         .put("imagePath", imagePath)
+        .put("downloadUrl", downloadUrl)
+        .put("expectedApkSha256", expectedApkSha256)
+        .put("saveToProject", saveToProject)
+        .put("projectId", projectId)
+        .put("projectName", projectName)
+        .put("displayName", displayName)
+        .put("requiresBuildToken", requiresBuildToken)
+        .put("allowDowngrade", allowDowngrade)
+        .put("autoLaunch", autoLaunch)
         .put("x", x)
         .put("y", y)
         .put("endX", endX)
@@ -112,6 +134,7 @@ data class BridgeRequest(
     companion object {
         private val idRegex = Regex("[A-Za-z0-9._-]{1,96}")
         private val relayImagePathRegex = Regex("[A-Za-z0-9._/-]{1,1024}")
+        private val shaRegex = Regex("[0-9a-fA-F]{64}")
 
         fun fromJson(json: JSONObject): BridgeRequest {
             val id = json.optString("id").trim()
@@ -121,12 +144,31 @@ data class BridgeRequest(
             val runId = json.optString("runId").trim().take(96)
             val buildId = json.optString("buildId").trim().take(96)
             val imagePath = json.optString("imagePath").trim().take(1_024)
+            val downloadUrl = json.optString("downloadUrl").trim().take(2_048)
+            val expectedApkSha256 = json.optString("expectedApkSha256").trim().lowercase().take(64)
+            val projectId = json.optString("projectId").trim().take(128)
             if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
             if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
             if (imagePath.isNotBlank()) {
                 require(relayImagePathRegex.matches(imagePath) && !imagePath.contains("..")) {
                     "Invalid bridge imagePath."
                 }
+            }
+            if (downloadUrl.isNotBlank()) {
+                require(downloadUrl.startsWith("https://", ignoreCase = true)) {
+                    "Bridge downloadUrl must use HTTPS."
+                }
+            }
+            if (expectedApkSha256.isNotBlank()) {
+                require(shaRegex.matches(expectedApkSha256)) {
+                    "expectedApkSha256 must be exactly 64 hexadecimal characters."
+                }
+            }
+            if (projectId.isNotBlank()) {
+                require(projectId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid APKbox projectId." }
+            }
+            if (type == BridgeCommandType.APK_INSTALL_URL) {
+                require(downloadUrl.isNotBlank()) { "APK_INSTALL_URL requires downloadUrl." }
             }
             return BridgeRequest(
                 id = id,
@@ -140,6 +182,15 @@ data class BridgeRequest(
                 selector = json.optString("selector").take(2_048),
                 value = json.optString("value").take(8_192),
                 imagePath = imagePath,
+                downloadUrl = downloadUrl,
+                expectedApkSha256 = expectedApkSha256,
+                saveToProject = json.optBoolean("saveToProject", false),
+                projectId = projectId,
+                projectName = json.optString("projectName").trim().take(256),
+                displayName = json.optString("displayName").trim().take(256),
+                requiresBuildToken = json.optBoolean("requiresBuildToken", false),
+                allowDowngrade = json.optBoolean("allowDowngrade", false),
+                autoLaunch = json.optBoolean("autoLaunch", false),
                 x = json.optInt("x", -1),
                 y = json.optInt("y", -1),
                 endX = json.optInt("endX", -1),
@@ -216,7 +267,7 @@ data class BridgeResult(
     val artifacts: List<BridgeArtifact> = emptyList(),
 ) {
     fun toJson(deviceId: String): JSONObject = JSONObject()
-        .put("schema", 4)
+        .put("schema", 5)
         .put("requestId", requestId)
         .put("deviceId", deviceId)
         .put("status", status.name)
