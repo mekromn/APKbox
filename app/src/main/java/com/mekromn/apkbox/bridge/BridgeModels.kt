@@ -10,7 +10,6 @@ enum class BridgeCommandType {
     DUMPSYS,
     LAUNCH,
 
-    // Informational presentation toolkit. Legacy NOTIFICATION/POPUP remain for compatibility.
     TOAST,
     NOTIFICATION,
     POPUP,
@@ -20,20 +19,19 @@ enum class BridgeCommandType {
     MESSAGE_HEADS_UP,
     PICTURE_MESSAGE,
 
-    // One-request remote APK download + unattended install.
     APK_INSTALL_URL,
 
-    // Universal durable operation control plane.
     JOB_LIST,
     JOB_STATUS,
     JOB_CANCEL,
     JOB_RESUME,
 
-    // Structured discovery. Agents should use these rather than guessing IDs/device state.
     PROJECT_LIST,
     PROJECT_GET,
     APK_LIST,
     APK_SEARCH,
+    APK_INSPECT,
+    APK_PULL,
     PACKAGE_STATE,
     INSTALLED_APPS,
     DEVICE_STATE,
@@ -95,6 +93,7 @@ data class BridgeRequest(
     val allowDowngrade: Boolean = false,
     val autoLaunch: Boolean = false,
     val jobId: String = "",
+    val apkRecordId: String = "",
     val query: String = "",
     val limit: Int = 100,
     val includeSystemApps: Boolean = false,
@@ -115,7 +114,7 @@ data class BridgeRequest(
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean = expiresAtEpochMs in 1 until now
 
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 6)
+        .put("schema", 7)
         .put("id", id)
         .put("type", type.name)
         .put("command", command)
@@ -139,6 +138,7 @@ data class BridgeRequest(
         .put("allowDowngrade", allowDowngrade)
         .put("autoLaunch", autoLaunch)
         .put("jobId", jobId)
+        .put("apkRecordId", apkRecordId)
         .put("query", query)
         .put("limit", limit)
         .put("includeSystemApps", includeSystemApps)
@@ -158,6 +158,7 @@ data class BridgeRequest(
 
     companion object {
         private val idRegex = Regex("[A-Za-z0-9._-]{1,96}")
+        private val recordIdRegex = Regex("[A-Za-z0-9._-]{1,128}")
         private val relayImagePathRegex = Regex("[A-Za-z0-9._/-]{1,1024}")
         private val shaRegex = Regex("[0-9a-fA-F]{64}")
 
@@ -169,6 +170,7 @@ data class BridgeRequest(
             val runId = json.optString("runId").trim().take(96)
             val buildId = json.optString("buildId").trim().take(96)
             val jobId = json.optString("jobId").trim().take(96)
+            val apkRecordId = json.optString("apkRecordId").trim().take(128)
             val imagePath = json.optString("imagePath").trim().take(1_024)
             val downloadUrl = json.optString("downloadUrl").trim().take(2_048)
             val expectedApkSha256 = json.optString("expectedApkSha256").trim().lowercase()
@@ -177,23 +179,18 @@ data class BridgeRequest(
             if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
             if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
             if (jobId.isNotBlank()) require(idRegex.matches(jobId)) { "Invalid bridge jobId." }
+            if (apkRecordId.isNotBlank()) require(recordIdRegex.matches(apkRecordId)) { "Invalid bridge apkRecordId." }
             if (imagePath.isNotBlank()) {
-                require(relayImagePathRegex.matches(imagePath) && !imagePath.contains("..")) {
-                    "Invalid bridge imagePath."
-                }
+                require(relayImagePathRegex.matches(imagePath) && !imagePath.contains("..")) { "Invalid bridge imagePath." }
             }
             if (downloadUrl.isNotBlank()) {
-                require(downloadUrl.startsWith("https://", ignoreCase = true)) {
-                    "Bridge downloadUrl must use HTTPS."
-                }
+                require(downloadUrl.startsWith("https://", ignoreCase = true)) { "Bridge downloadUrl must use HTTPS." }
             }
             if (expectedApkSha256.isNotBlank()) {
-                require(shaRegex.matches(expectedApkSha256)) {
-                    "expectedApkSha256 must be exactly 64 hexadecimal characters."
-                }
+                require(shaRegex.matches(expectedApkSha256)) { "expectedApkSha256 must be exactly 64 hexadecimal characters." }
             }
             if (projectId.isNotBlank()) {
-                require(projectId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid APKbox projectId." }
+                require(recordIdRegex.matches(projectId)) { "Invalid APKbox projectId." }
             }
             when (type) {
                 BridgeCommandType.APK_INSTALL_URL -> require(downloadUrl.isNotBlank()) { "APK_INSTALL_URL requires downloadUrl." }
@@ -202,6 +199,8 @@ data class BridgeRequest(
                 BridgeCommandType.JOB_RESUME -> require(jobId.isNotBlank()) { "${type.name} requires jobId." }
                 BridgeCommandType.PROJECT_GET -> require(projectId.isNotBlank()) { "PROJECT_GET requires projectId." }
                 BridgeCommandType.APK_SEARCH -> require(query.isNotBlank()) { "APK_SEARCH requires query." }
+                BridgeCommandType.APK_INSPECT,
+                BridgeCommandType.APK_PULL -> require(apkRecordId.isNotBlank()) { "${type.name} requires apkRecordId." }
                 else -> Unit
             }
             return BridgeRequest(
@@ -228,6 +227,7 @@ data class BridgeRequest(
                 allowDowngrade = json.optBoolean("allowDowngrade", false),
                 autoLaunch = json.optBoolean("autoLaunch", false),
                 jobId = jobId,
+                apkRecordId = apkRecordId,
                 query = query,
                 limit = json.optInt("limit", 100).coerceIn(1, 500),
                 includeSystemApps = json.optBoolean("includeSystemApps", false),
@@ -307,7 +307,7 @@ data class BridgeResult(
     val artifacts: List<BridgeArtifact> = emptyList(),
 ) {
     fun toJson(deviceId: String): JSONObject = JSONObject()
-        .put("schema", 6)
+        .put("schema", 7)
         .put("requestId", requestId)
         .put("deviceId", deviceId)
         .put("status", status.name)
