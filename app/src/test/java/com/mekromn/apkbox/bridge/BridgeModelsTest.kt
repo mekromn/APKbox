@@ -78,6 +78,37 @@ class BridgeModelsTest {
     }
 
     @Test
+    fun universalJobInventoryAndApkRetrievalFieldsRoundTrip() {
+        val original = BridgeRequest(
+            id = "apk-pull-001",
+            type = BridgeCommandType.APK_PULL,
+            jobId = "pull-job-42",
+            apkRecordId = "record-42",
+            projectId = "project-42",
+            packageName = "com.example.app",
+            query = "candidate",
+            limit = 321,
+            includeSystemApps = true,
+            reason = "Pull exact stored APK",
+            createdAtEpochMs = 1000L,
+            expiresAtEpochMs = 2000L,
+        )
+        assertEquals(original, BridgeRequest.fromJson(original.toJson()))
+    }
+
+    @Test
+    fun jobAndExactApkCommandsRequireStableIds() {
+        listOf("JOB_STATUS", "JOB_CANCEL", "JOB_RESUME").forEach { type ->
+            val json = JSONObject().put("id", "job-required-$type").put("type", type)
+            assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(json) }
+        }
+        listOf("APK_INSPECT", "APK_PULL").forEach { type ->
+            val json = JSONObject().put("id", "record-required-$type").put("type", type)
+            assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(json) }
+        }
+    }
+
+    @Test
     fun invalidAdvancedIdsAndImageTraversalAreRejectedDuringParsing() {
         val badRun = JSONObject()
             .put("id", "valid-id")

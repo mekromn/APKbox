@@ -33,7 +33,9 @@ class BuildRunner(
     private val downloader = BuildDownloader(store, artifacts)
     private val mutex = Mutex()
 
-    suspend fun run(candidate: BuildCandidate): BuildRunCheckpoint = mutex.withLock {
+    suspend fun run(candidate: BuildCandidate): BuildRunCheckpoint = runInternal(candidate, explicitResume = false)
+
+    private suspend fun runInternal(candidate: BuildCandidate, explicitResume: Boolean): BuildRunCheckpoint = mutex.withLock {
         store.saveCandidate(candidate)
         val durable = jobs.begin(
             jobId = candidate.runId,
@@ -47,11 +49,24 @@ class BuildRunner(
         require(durable.type == DurableJobType.BUILD_RUNNER) {
             "Durable job '${candidate.runId}' is already owned by ${durable.type}."
         }
-        when {
-            durable.state in setOf(DurableJobState.INTERRUPTED, DurableJobState.FAILED, DurableJobState.PAUSED) && durable.resumable ->
+        when (durable.state) {
+            DurableJobState.INTERRUPTED,
+            DurableJobState.FAILED,
+            DurableJobState.PAUSED -> {
+                require(explicitResume) {
+                    "Build job '${candidate.runId}' already exists in ${durable.state}. Use JOB_RESUME instead of repeating BUILD_START."
+                }
+                require(durable.resumable) { "Build job '${candidate.runId}' is not resumable; use a new runId." }
                 jobs.prepareResume(candidate.runId)
-            durable.state == DurableJobState.SUCCEEDED -> Unit
-            else -> jobs.start(candidate.runId, "Build Runner started candidate ${candidate.buildId}.")
+            }
+            DurableJobState.CANCELLED -> error("Build job '${candidate.runId}' was cancelled and is terminal; use a new runId.")
+            DurableJobState.RUNNING,
+            DurableJobState.CANCEL_REQUESTED -> error("Build job '${candidate.runId}' is already active in ${durable.state}.")
+            DurableJobState.SUCCEEDED -> Unit
+            DurableJobState.CREATED -> {
+                require(!explicitResume) { "Build job '${candidate.runId}' has not started and cannot be resumed." }
+                jobs.start(candidate.runId, "Build Runner started candidate ${candidate.buildId}.")
+            }
         }
 
         val prior = store.loadCheckpoint(candidate.runId)
@@ -327,7 +342,7 @@ class BuildRunner(
 
     suspend fun resumeJob(runId: String): BuildRunCheckpoint {
         val candidate = store.loadCandidate(runId) ?: error("Build job '$runId' has no persisted candidate.")
-        return run(candidate)
+        return runInternal(candidate, explicitResume = true)
     }
 
     fun checkpoint(runId: String): BuildRunCheckpoint? = store.loadCheckpoint(runId)

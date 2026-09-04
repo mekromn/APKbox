@@ -86,6 +86,7 @@ class ApkRetrievalCoordinator(
         risk = risk,
         config = config,
         token = token,
+        explicitResume = false,
     )
 
     suspend fun resumePull(
@@ -118,7 +119,7 @@ class ApkRetrievalCoordinator(
                 detail = "APK pull job '${request.jobId}' is missing its persisted apkRecordId.",
             )
         }
-        return runPull(request.id, request.jobId, recordId, risk, config, token)
+        return runPull(request.id, request.jobId, recordId, risk, config, token, explicitResume = true)
     }
 
     private suspend fun runPull(
@@ -128,6 +129,7 @@ class ApkRetrievalCoordinator(
         risk: BridgeRisk,
         config: BridgeConfig,
         token: String,
+        explicitResume: Boolean,
     ): BridgeResult {
         val started = System.currentTimeMillis()
         return runCatching {
@@ -154,8 +156,8 @@ class ApkRetrievalCoordinator(
                 "Job '$jobId' was created for a different APK record. Use a new jobId."
             }
 
-            if (initial.state == DurableJobState.SUCCEEDED && initial.resultJson.isNotBlank()) {
-                return@runCatching BridgeResult(
+            when (initial.state) {
+                DurableJobState.SUCCEEDED -> return@runCatching BridgeResult(
                     requestId = resultRequestId,
                     status = BridgeResultStatus.SUCCESS,
                     risk = risk,
@@ -163,11 +165,20 @@ class ApkRetrievalCoordinator(
                     output = initial.resultJson,
                     durationMs = System.currentTimeMillis() - started,
                 )
-            }
-            if (initial.state in setOf(DurableJobState.INTERRUPTED, DurableJobState.FAILED, DurableJobState.PAUSED)) {
-                jobs.prepareResume(jobId)
-            } else {
-                jobs.start(jobId, "Resolving fastest exact source for ${record.displayName}.")
+                DurableJobState.INTERRUPTED,
+                DurableJobState.FAILED,
+                DurableJobState.PAUSED -> {
+                    require(explicitResume) { "APK pull job '$jobId' already exists in ${initial.state}. Use JOB_RESUME." }
+                    require(initial.resumable) { "APK pull job '$jobId' is not resumable; use a new jobId." }
+                    jobs.prepareResume(jobId)
+                }
+                DurableJobState.CANCELLED -> error("APK pull job '$jobId' was cancelled and is terminal; use a new jobId.")
+                DurableJobState.RUNNING,
+                DurableJobState.CANCEL_REQUESTED -> error("APK pull job '$jobId' is already active in ${initial.state}.")
+                DurableJobState.CREATED -> {
+                    require(!explicitResume) { "APK pull job '$jobId' has not started and cannot be resumed." }
+                    jobs.start(jobId, "Resolving fastest exact source for ${record.displayName}.")
+                }
             }
             jobs.stage(jobId, "RESOLVING_SOURCE", "Selecting the fastest trustworthy exact source for ${record.sha256}.", true, true)
 
@@ -333,6 +344,7 @@ class ApkRetrievalCoordinator(
         var metaInfCount = 0
         var compressedBytes = 0L
         var uncompressedBytes = 0L
+        var nativeLibraryCount = 0
         val nativeLibraries = mutableListOf<String>()
         val abis = linkedSetOf<String>()
         val dexFiles = mutableListOf<String>()
@@ -358,6 +370,7 @@ class ApkRetrievalCoordinator(
                 if (name == "resources.arsc") hasResourcesArsc = true
                 val libMatch = Regex("^lib/([^/]+)/(.+\\.so)$").find(name)
                 if (libMatch != null) {
+                    nativeLibraryCount++
                     abis += libMatch.groupValues[1]
                     if (nativeLibraries.size < limit) nativeLibraries += name
                 }
@@ -421,7 +434,7 @@ class ApkRetrievalCoordinator(
                 .put("dexCount", dexCount)
                 .put("dexFiles", JSONArray(dexFiles))
                 .put("abis", JSONArray(abis.toList()))
-                .put("nativeLibraryCount", nativeLibraries.size)
+                .put("nativeLibraryCount", nativeLibraryCount)
                 .put("nativeLibraries", JSONArray(nativeLibraries))
                 .put("assetEntryCount", assetsCount)
                 .put("resourceEntryCount", resCount)

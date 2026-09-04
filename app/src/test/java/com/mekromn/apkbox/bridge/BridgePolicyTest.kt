@@ -27,6 +27,37 @@ class BridgePolicyTest {
     }
 
     @Test
+    fun universalInventoryAndApkRetrievalAreReadOnly() {
+        val types = listOf(
+            BridgeCommandType.JOB_LIST,
+            BridgeCommandType.JOB_STATUS,
+            BridgeCommandType.PROJECT_LIST,
+            BridgeCommandType.PROJECT_GET,
+            BridgeCommandType.APK_LIST,
+            BridgeCommandType.APK_SEARCH,
+            BridgeCommandType.APK_INSPECT,
+            BridgeCommandType.APK_PULL,
+            BridgeCommandType.PACKAGE_STATE,
+            BridgeCommandType.INSTALLED_APPS,
+            BridgeCommandType.DEVICE_STATE,
+        )
+        types.forEach { type -> assertEquals("$type must stay read-only", BridgeRisk.READ_ONLY, BridgePolicy.classify(request(type))) }
+    }
+
+    @Test
+    fun jobCancelIsScopedDebugButResumeIsAlwaysMutating() {
+        val cancel = request(BridgeCommandType.JOB_CANCEL, jobId = "job-42")
+        assertEquals(BridgeRisk.DEBUG_ACTION, BridgePolicy.classify(cancel))
+        assertTrue(BridgePolicy.trustedSessionEligible(cancel))
+        assertTrue(BridgePolicy.mayAutoExecute(cancel, trustedUntil, true, true, now))
+
+        val resume = request(BridgeCommandType.JOB_RESUME, jobId = "job-42")
+        assertEquals(BridgeRisk.MUTATING, BridgePolicy.classify(resume))
+        assertFalse(BridgePolicy.trustedSessionEligible(resume))
+        assertFalse(BridgePolicy.mayAutoExecute(resume, trustedUntil, true, true, now))
+    }
+
+    @Test
     fun obviousReadOnlyShellMayUseTrustedSession() {
         val request = request(BridgeCommandType.SHELL, command = "getprop ro.product.model")
         assertEquals(BridgeRisk.READ_ONLY, BridgePolicy.classify(request))
@@ -202,6 +233,7 @@ class BridgePolicyTest {
         message: String = "",
         runId: String = "",
         buildId: String = "",
+        jobId: String = "",
         sequenceNumber: Long = 0L,
     ) = BridgeRequest(
         id = "test-request",
@@ -212,6 +244,7 @@ class BridgePolicyTest {
         message = message,
         runId = runId,
         buildId = buildId,
+        jobId = jobId,
         sequenceNumber = sequenceNumber,
         createdAtEpochMs = now,
         expiresAtEpochMs = trustedUntil,

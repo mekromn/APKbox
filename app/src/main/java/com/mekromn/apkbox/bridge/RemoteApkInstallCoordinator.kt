@@ -51,24 +51,37 @@ class RemoteApkInstallCoordinator(
             payloadJson = request.toJson().toString(),
             resumable = true,
         )
-        if (existing.state == DurableJobState.SUCCEEDED && existing.resultJson.isNotBlank()) {
-            return BridgeResult(
+        when (existing.state) {
+            DurableJobState.SUCCEEDED -> return BridgeResult(
                 requestId = request.id,
                 status = BridgeResultStatus.SUCCESS,
                 risk = risk,
                 detail = "Remote APK job '$jobId' had already completed successfully.",
                 output = existing.resultJson,
             )
-        }
-        if (existing.state == DurableJobState.RUNNING && existing.requestId != request.id) {
-            return BridgeResult(
+            DurableJobState.INTERRUPTED,
+            DurableJobState.FAILED,
+            DurableJobState.PAUSED -> return BridgeResult(
                 requestId = request.id,
                 status = BridgeResultStatus.INVALID,
                 risk = risk,
-                detail = "Job '$jobId' is already running under request ${existing.requestId}.",
+                detail = "Remote APK job '$jobId' already exists in ${existing.state}. Use JOB_RESUME when resumable; do not repeat APK_INSTALL_URL.",
             )
+            DurableJobState.CANCELLED -> return BridgeResult(
+                requestId = request.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Remote APK job '$jobId' was cancelled and is terminal. Use a new jobId.",
+            )
+            DurableJobState.RUNNING,
+            DurableJobState.CANCEL_REQUESTED -> return BridgeResult(
+                requestId = request.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Remote APK job '$jobId' is already active in ${existing.state}.",
+            )
+            DurableJobState.CREATED -> jobs.start(jobId, "Remote APK deployment started.")
         }
-        jobs.start(jobId, "Remote APK deployment started.")
         return runTransaction(request, request.id, risk, jobId)
     }
 
@@ -94,6 +107,22 @@ class RemoteApkInstallCoordinator(
                 risk = risk,
                 detail = "Job '$jobId' is already complete.",
                 output = job.resultJson,
+            )
+        }
+        if (job.state == DurableJobState.CANCELLED) {
+            return BridgeResult(
+                requestId = controllerRequest.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Job '$jobId' was cancelled and is terminal; use a new jobId.",
+            )
+        }
+        if (job.state !in setOf(DurableJobState.INTERRUPTED, DurableJobState.FAILED, DurableJobState.PAUSED) || !job.resumable) {
+            return BridgeResult(
+                requestId = controllerRequest.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Job '$jobId' cannot resume from ${job.state} (resumable=${job.resumable}).",
             )
         }
         val original = runCatching { BridgeRequest.fromJson(JSONObject(job.payloadJson)) }.getOrElse { failure ->
