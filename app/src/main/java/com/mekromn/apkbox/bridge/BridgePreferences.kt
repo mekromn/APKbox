@@ -43,7 +43,7 @@ enum class BridgeApprovalPresentation(
 ) {
     NOTIFICATION(
         "Notification",
-        "Current behavior: persistent high-priority approval notification with Deny/Allow actions.",
+        "Persistent high-priority approval notification with Deny/Allow actions.",
     ),
     ALWAYS_ON_TOP(
         "Always-on-top security popup",
@@ -140,10 +140,10 @@ class BridgePreferences(context: Context) {
         }.getOrDefault(BridgeMessagePresentation.POPUP_ACTIVITY)
         val approvalPresentation = runCatching {
             BridgeApprovalPresentation.valueOf(
-                prefs.getString("approvalPresentation", BridgeApprovalPresentation.NOTIFICATION.name)
-                    ?: BridgeApprovalPresentation.NOTIFICATION.name
+                prefs.getString("approvalPresentation", BridgeApprovalPresentation.ALWAYS_ON_TOP.name)
+                    ?: BridgeApprovalPresentation.ALWAYS_ON_TOP.name
             )
-        }.getOrDefault(BridgeApprovalPresentation.NOTIFICATION)
+        }.getOrDefault(BridgeApprovalPresentation.ALWAYS_ON_TOP)
         return BridgeConfig(
             enabled = prefs.getBoolean("enabled", false),
             repoOwner = prefs.getString("repoOwner", "mekromn") ?: "mekromn",
