@@ -21,12 +21,32 @@ jobs:
         with:
           ref: feature/screen-agent
           fetch-depth: 0
+      - name: Narrow ambiguous private runPull guard
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply_platform_hardening.py')
+          text = path.read_text()
+          old = '''replace_once(
+              retrieval,
+              "        token: String,\\n    ): BridgeResult {",
+              "        token: String,\\n        explicitResume: Boolean,\\n    ): BridgeResult {",
+          )'''
+          new = '''replace_once(
+              retrieval,
+              "    private suspend fun runPull(\\n        resultRequestId: String,\\n        jobId: String,\\n        apkRecordId: String,\\n        risk: BridgeRisk,\\n        config: BridgeConfig,\\n        token: String,\\n    ): BridgeResult {",
+              "    private suspend fun runPull(\\n        resultRequestId: String,\\n        jobId: String,\\n        apkRecordId: String,\\n        risk: BridgeRisk,\\n        config: BridgeConfig,\\n        token: String,\\n        explicitResume: Boolean,\\n    ): BridgeResult {",
+          )'''
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one ambiguous guard block, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Apply guarded hardening
         run: python3 scripts/apply_platform_hardening.py
       - name: Commit hardened sources and tests
         run: |
-          if git diff --quiet; then
-            echo "No hardening changes needed."
+          if git diff --quiet app/src/main/java/com/mekromn/apkbox app/src/test/java/com/mekromn/apkbox; then
+            echo "No application hardening changes needed."
             exit 0
           fi
           git config user.name "github-actions[bot]"
