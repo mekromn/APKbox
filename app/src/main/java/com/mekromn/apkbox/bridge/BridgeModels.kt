@@ -10,8 +10,7 @@ enum class BridgeCommandType {
     DUMPSYS,
     LAUNCH,
 
-    // Informational presentation toolkit. Legacy NOTIFICATION/POPUP remain for compatibility;
-    // explicit MESSAGE_* verbs let an agent choose the least intrusive useful presentation.
+    // Informational presentation toolkit. Legacy NOTIFICATION/POPUP remain for compatibility.
     TOAST,
     NOTIFICATION,
     POPUP,
@@ -21,9 +20,23 @@ enum class BridgeCommandType {
     MESSAGE_HEADS_UP,
     PICTURE_MESSAGE,
 
-    // One-request remote APK download + unattended install. This is intentionally separate from
-    // BUILD_START so BuildRunner can retain its stricter candidate-manifest + exact-SHA contract.
+    // One-request remote APK download + unattended install.
     APK_INSTALL_URL,
+
+    // Universal durable operation control plane.
+    JOB_LIST,
+    JOB_STATUS,
+    JOB_CANCEL,
+    JOB_RESUME,
+
+    // Structured discovery. Agents should use these rather than guessing IDs/device state.
+    PROJECT_LIST,
+    PROJECT_GET,
+    APK_LIST,
+    APK_SEARCH,
+    PACKAGE_STATE,
+    INSTALLED_APPS,
+    DEVICE_STATE,
 
     UI_SNAPSHOT,
     SCREENSHOT,
@@ -81,6 +94,10 @@ data class BridgeRequest(
     val requiresBuildToken: Boolean = false,
     val allowDowngrade: Boolean = false,
     val autoLaunch: Boolean = false,
+    val jobId: String = "",
+    val query: String = "",
+    val limit: Int = 100,
+    val includeSystemApps: Boolean = false,
     val x: Int = -1,
     val y: Int = -1,
     val endX: Int = -1,
@@ -98,7 +115,7 @@ data class BridgeRequest(
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean = expiresAtEpochMs in 1 until now
 
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 5)
+        .put("schema", 6)
         .put("id", id)
         .put("type", type.name)
         .put("command", command)
@@ -121,6 +138,10 @@ data class BridgeRequest(
         .put("requiresBuildToken", requiresBuildToken)
         .put("allowDowngrade", allowDowngrade)
         .put("autoLaunch", autoLaunch)
+        .put("jobId", jobId)
+        .put("query", query)
+        .put("limit", limit)
+        .put("includeSystemApps", includeSystemApps)
         .put("x", x)
         .put("y", y)
         .put("endX", endX)
@@ -147,12 +168,15 @@ data class BridgeRequest(
                 .getOrElse { error("Unsupported bridge command type.") }
             val runId = json.optString("runId").trim().take(96)
             val buildId = json.optString("buildId").trim().take(96)
+            val jobId = json.optString("jobId").trim().take(96)
             val imagePath = json.optString("imagePath").trim().take(1_024)
             val downloadUrl = json.optString("downloadUrl").trim().take(2_048)
             val expectedApkSha256 = json.optString("expectedApkSha256").trim().lowercase()
             val projectId = json.optString("projectId").trim().take(128)
+            val query = json.optString("query").trim().take(512)
             if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
             if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
+            if (jobId.isNotBlank()) require(idRegex.matches(jobId)) { "Invalid bridge jobId." }
             if (imagePath.isNotBlank()) {
                 require(relayImagePathRegex.matches(imagePath) && !imagePath.contains("..")) {
                     "Invalid bridge imagePath."
@@ -171,8 +195,14 @@ data class BridgeRequest(
             if (projectId.isNotBlank()) {
                 require(projectId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid APKbox projectId." }
             }
-            if (type == BridgeCommandType.APK_INSTALL_URL) {
-                require(downloadUrl.isNotBlank()) { "APK_INSTALL_URL requires downloadUrl." }
+            when (type) {
+                BridgeCommandType.APK_INSTALL_URL -> require(downloadUrl.isNotBlank()) { "APK_INSTALL_URL requires downloadUrl." }
+                BridgeCommandType.JOB_STATUS,
+                BridgeCommandType.JOB_CANCEL,
+                BridgeCommandType.JOB_RESUME -> require(jobId.isNotBlank()) { "${type.name} requires jobId." }
+                BridgeCommandType.PROJECT_GET -> require(projectId.isNotBlank()) { "PROJECT_GET requires projectId." }
+                BridgeCommandType.APK_SEARCH -> require(query.isNotBlank()) { "APK_SEARCH requires query." }
+                else -> Unit
             }
             return BridgeRequest(
                 id = id,
@@ -197,6 +227,10 @@ data class BridgeRequest(
                 requiresBuildToken = json.optBoolean("requiresBuildToken", false),
                 allowDowngrade = json.optBoolean("allowDowngrade", false),
                 autoLaunch = json.optBoolean("autoLaunch", false),
+                jobId = jobId,
+                query = query,
+                limit = json.optInt("limit", 100).coerceIn(1, 500),
+                includeSystemApps = json.optBoolean("includeSystemApps", false),
                 x = json.optInt("x", -1),
                 y = json.optInt("y", -1),
                 endX = json.optInt("endX", -1),
@@ -273,7 +307,7 @@ data class BridgeResult(
     val artifacts: List<BridgeArtifact> = emptyList(),
 ) {
     fun toJson(deviceId: String): JSONObject = JSONObject()
-        .put("schema", 5)
+        .put("schema", 6)
         .put("requestId", requestId)
         .put("deviceId", deviceId)
         .put("status", status.name)
