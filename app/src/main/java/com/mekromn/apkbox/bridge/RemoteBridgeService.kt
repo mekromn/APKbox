@@ -97,7 +97,7 @@ class RemoteBridgeService : Service() {
 
     override fun onDestroy() {
         loopJob?.cancel()
-        notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
+        clearApprovalPresentation()
         BridgeRuntime.reset()
         super.onDestroy()
     }
@@ -144,6 +144,7 @@ class RemoteBridgeService : Service() {
                 continue
             } else {
                 BridgeRuntime.update { it.copy(pendingRequestId = "") }
+                clearApprovalPresentation()
             }
 
             val heartbeatFingerprint = heartbeatFingerprint(config)
@@ -370,7 +371,7 @@ class RemoteBridgeService : Service() {
 
     private suspend fun resolvePending(allow: Boolean, trust: Boolean) {
         val pending = stateStore.loadPending() ?: return
-        notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
+        clearApprovalPresentation()
         BridgeRuntime.update { it.copy(pendingRequestId = "") }
 
         val item = RelayInboxItem(pending.inboxPath, pending.inboxSha, pending.request)
@@ -457,10 +458,38 @@ class RemoteBridgeService : Service() {
         append(adbState.wifiAvailable).append('|')
         append(config.trustedUntilEpochMs).append('|')
         append(config.allowInformational).append('|')
-        append(config.allowPopups)
+        append(config.allowPopups).append('|')
+        append(config.messagePresentation.name).append('|')
+        append(config.approvalPresentation.name)
     }
 
+    /**
+     * Security approval presentation is purely local. Relay requests cannot choose notification vs
+     * overlay. In popup-only mode the notification is suppressed only after the overlay has proven
+     * that WindowManager accepted it; otherwise the existing notification is the hard fallback.
+     */
     private fun showApproval(pending: BridgePendingRequest) {
+        when (prefs.state.value.approvalPresentation) {
+            BridgeApprovalPresentation.NOTIFICATION -> {
+                BridgeApprovalOverlayController.dismiss(this)
+                showApprovalNotification(pending)
+            }
+            BridgeApprovalPresentation.ALWAYS_ON_TOP -> {
+                val overlayShown = BridgeApprovalOverlayController.show(this, pending)
+                if (overlayShown) {
+                    notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
+                } else {
+                    showApprovalNotification(pending)
+                }
+            }
+            BridgeApprovalPresentation.BOTH -> {
+                BridgeApprovalOverlayController.show(this, pending)
+                showApprovalNotification(pending)
+            }
+        }
+    }
+
+    private fun showApprovalNotification(pending: BridgePendingRequest) {
         val openIntent = Intent(this, BridgeApprovalActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val openPending = PendingIntent.getActivity(
             this,
@@ -478,6 +507,13 @@ class RemoteBridgeService : Service() {
             this,
             2,
             Intent(this, RemoteBridgeService::class.java).setAction(ACTION_DENY),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val displayOptions = PendingIntent.getActivity(
+            this,
+            4,
+            Intent(this, BridgeMessageDisplaySettingsActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val builder = NotificationCompat.Builder(this, APPROVAL_CHANNEL)
@@ -504,6 +540,9 @@ class RemoteBridgeService : Service() {
                             append("\n\nSelector: ")
                             append(it.take(500))
                         }
+                        pending.request.imagePath.takeIf { it.isNotBlank() }?.let {
+                            append("\n\nImage: ").append(it.take(500))
+                        }
                     }
                 )
             )
@@ -514,6 +553,7 @@ class RemoteBridgeService : Service() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .addAction(0, "Deny", deny)
             .addAction(0, "Allow once", allowOnce)
+            .addAction(android.R.drawable.ic_menu_preferences, "Display", displayOptions)
 
         if (BridgePolicy.trustedSessionEligible(pending.request)) {
             val trust = PendingIntent.getService(
@@ -525,6 +565,11 @@ class RemoteBridgeService : Service() {
             builder.addAction(0, "Allow + trust 10 min", trust)
         }
         notificationManager.notify(APPROVAL_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun clearApprovalPresentation() {
+        notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
+        BridgeApprovalOverlayController.dismiss(this)
     }
 
     private fun statusLine(): String {
@@ -600,7 +645,7 @@ class RemoteBridgeService : Service() {
                 "APKbox Bridge approvals",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Approval prompts for remote debugging commands"
+                description = "Approval prompts for remote debugging commands when notification presentation is enabled or used as fallback"
                 enableVibration(true)
             }
         )
@@ -615,6 +660,11 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.TOAST -> request.message.take(220)
         BridgeCommandType.NOTIFICATION -> request.message.take(220)
         BridgeCommandType.POPUP -> request.message.take(220)
+        BridgeCommandType.MESSAGE_SMALL_POPUP -> "Small popup: ${request.message.take(180)}"
+        BridgeCommandType.MESSAGE_ALWAYS_ON_TOP -> "Always-on-top message: ${request.message.take(180)}"
+        BridgeCommandType.MESSAGE_FULL_WINDOW -> "Full-window message: ${request.message.take(180)}"
+        BridgeCommandType.MESSAGE_HEADS_UP -> "Heads-up message: ${request.message.take(180)}"
+        BridgeCommandType.PICTURE_MESSAGE -> "Picture message: ${request.title.ifBlank { request.imagePath }.take(180)}"
         BridgeCommandType.UI_SNAPSHOT -> "Read current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture current screen"
         BridgeCommandType.UI_TAP -> "Tap ${request.x},${request.y} in ${request.packageName}"
@@ -643,7 +693,7 @@ class RemoteBridgeService : Service() {
     private fun stopBridge() {
         loopJob?.cancel()
         loopJob = null
-        notificationManager.cancel(APPROVAL_NOTIFICATION_ID)
+        clearApprovalPresentation()
         BridgeRuntime.reset()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
