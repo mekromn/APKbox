@@ -1,15 +1,18 @@
 package com.mekromn.apkbox.bridge
 
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -25,12 +28,16 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.mekromn.apkbox.ApkBoxServices
 import com.mekromn.apkbox.ui.theme.APKboxTheme
+import java.io.File
 
 class BridgeMessageActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,6 +71,14 @@ private fun BridgeMessageScreen(
     onDisplayOptions: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val image = remember(popup?.imageFilePath) {
+        popup?.imageFilePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isFile }
+            ?.let { file -> BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap() }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         bottomBar = {
@@ -106,6 +121,25 @@ private fun BridgeMessageScreen(
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
             )
+
+            if (image != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                ) {
+                    Image(
+                        bitmap = image,
+                        contentDescription = popup?.title ?: "Bridge picture message",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 160.dp, max = 520.dp)
+                            .padding(10.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+            }
+
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
