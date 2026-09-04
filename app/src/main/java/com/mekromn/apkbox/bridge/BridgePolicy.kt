@@ -45,7 +45,12 @@ object BridgePolicy {
     fun classify(request: BridgeRequest): BridgeRisk = when (request.type) {
         BridgeCommandType.TOAST,
         BridgeCommandType.NOTIFICATION,
-        BridgeCommandType.POPUP -> BridgeRisk.INFO
+        BridgeCommandType.POPUP,
+        BridgeCommandType.MESSAGE_SMALL_POPUP,
+        BridgeCommandType.MESSAGE_ALWAYS_ON_TOP,
+        BridgeCommandType.MESSAGE_FULL_WINDOW,
+        BridgeCommandType.MESSAGE_HEADS_UP,
+        BridgeCommandType.PICTURE_MESSAGE -> BridgeRisk.INFO
 
         BridgeCommandType.LOGCAT,
         BridgeCommandType.APP_LOGCAT,
@@ -81,9 +86,15 @@ object BridgePolicy {
     ): Boolean {
         val risk = classify(request)
         return when (risk) {
-            BridgeRisk.INFO -> when (request.type) {
-                BridgeCommandType.POPUP -> allowInformational && allowPopups
-                else -> allowInformational
+            BridgeRisk.INFO -> {
+                val intrusivePresentation = request.type in setOf(
+                    BridgeCommandType.POPUP,
+                    BridgeCommandType.MESSAGE_SMALL_POPUP,
+                    BridgeCommandType.MESSAGE_ALWAYS_ON_TOP,
+                    BridgeCommandType.MESSAGE_FULL_WINDOW,
+                    BridgeCommandType.PICTURE_MESSAGE,
+                )
+                allowInformational && (!intrusivePresentation || allowPopups)
             }
             BridgeRisk.READ_ONLY -> trustedUntilEpochMs > now
             BridgeRisk.DEBUG_ACTION -> trustedUntilEpochMs > now && debugActionIsSafelyScoped(request)
