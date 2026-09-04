@@ -28,6 +28,7 @@ data class ApkRecord(
     val chunkCount: Int,
     val newBytesAdded: Long,
     val starred: Boolean = false,
+    val title: String = "",
     val description: String = "",
     val notes: String = "",
     val iconUpdatedAtEpochMs: Long = 0L,
