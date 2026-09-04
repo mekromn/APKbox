@@ -2,9 +2,14 @@ package com.mekromn.apkbox.agent
 
 import android.content.Context
 import android.net.Uri
+import com.mekromn.apkbox.artifacts.ArtifactCancelledException
+import com.mekromn.apkbox.artifacts.ArtifactIngestor
 import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
+import com.mekromn.apkbox.jobs.DurableJobEngine
+import com.mekromn.apkbox.jobs.DurableJobState
+import com.mekromn.apkbox.jobs.DurableJobType
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
@@ -17,30 +22,65 @@ class BuildRunner(
     context: Context,
     private val library: LibraryStore,
     private val privileged: PrivilegedBridgeManager,
+    private val jobs: DurableJobEngine,
+    artifacts: ArtifactIngestor,
 ) {
     private val appContext = context.applicationContext
     private val store = BuildRunStore(appContext)
     private val credentials = BuildSourceCredentials(appContext)
-    private val downloader = BuildDownloader(store)
+    private val downloader = BuildDownloader(store, artifacts)
     private val mutex = Mutex()
 
     suspend fun run(candidate: BuildCandidate): BuildRunCheckpoint = mutex.withLock {
         store.saveCandidate(candidate)
+        val durable = jobs.begin(
+            jobId = candidate.runId,
+            type = DurableJobType.BUILD_RUNNER,
+            requestId = candidate.buildId,
+            packageName = candidate.targetPackage,
+            projectId = candidate.projectId,
+            payloadJson = candidate.toJson().toString(),
+            resumable = true,
+        )
+        require(durable.type == DurableJobType.BUILD_RUNNER) {
+            "Durable job '${candidate.runId}' is already owned by ${durable.type}."
+        }
+        when {
+            durable.state in setOf(DurableJobState.INTERRUPTED, DurableJobState.FAILED, DurableJobState.PAUSED) && durable.resumable ->
+                jobs.prepareResume(candidate.runId)
+            durable.state == DurableJobState.SUCCEEDED -> Unit
+            else -> jobs.start(candidate.runId, "Build Runner started candidate ${candidate.buildId}.")
+        }
+
         val prior = store.loadCheckpoint(candidate.runId)
         if (prior != null && prior.buildId == candidate.buildId && prior.apkSha256.equals(candidate.expectedApkSha256, true)) {
             when (prior.state) {
-                BuildRunState.PASSED,
-                BuildRunState.TESTING -> return@withLock prior
+                BuildRunState.PASSED -> {
+                    jobs.succeed(candidate.runId, prior.detail, prior.toJson().toString())
+                    return@withLock prior
+                }
+                BuildRunState.TESTING -> {
+                    jobs.stage(candidate.runId, "TESTING", prior.detail, cancellable = false, resumable = true)
+                    return@withLock prior
+                }
                 BuildRunState.INSTALLING,
                 BuildRunState.LAUNCHING -> {
                     val installedSha = installedPackageSha256(candidate.targetPackage)
                     if (installedSha.equals(candidate.expectedApkSha256, ignoreCase = true)) {
-                        var resumed = prior.copy(
+                        val resumed = prior.copy(
                             state = BuildRunState.LAUNCHING,
-                            detail = "Recovered after process interruption: installed base.apk matches the exact candidate SHA.",
+                            detail = "Recovered after interruption: installed base.apk matches the exact candidate SHA.",
                             updatedAtEpochMs = System.currentTimeMillis(),
                         )
                         store.saveCheckpoint(resumed)
+                        jobs.stage(
+                            candidate.runId,
+                            "VERIFYING_INSTALLED",
+                            resumed.detail,
+                            cancellable = false,
+                            resumable = true,
+                            artifactSha256 = candidate.expectedApkSha256,
+                        )
                         return@withLock finishAfterInstalled(candidate, resumed)
                     }
                 }
@@ -66,31 +106,45 @@ class BuildRunner(
             return@withLock fail(
                 checkpoint,
                 BuildRunState.BLOCKED_AUTH_REQUIRED,
-                "Private build source requires the separately encrypted read-only build-source token.",
+                "Private build source requires the encrypted read-only build-source token.",
+                resumable = false,
             )
         }
 
         val token = if (candidate.requiresBuildToken) credentials.readToken() else null
-        checkpoint = transition(checkpoint, BuildRunState.DOWNLOADING, "Downloading build artifact.")
+        checkpoint = transition(checkpoint, BuildRunState.DOWNLOADING, "Downloading build artifact through the shared resumable artifact engine.")
         var lastPersistAt = 0L
         var lastPersistBytes = -1L
         val apkFile = try {
-            downloader.obtainApk(candidate, token) { downloaded, total ->
-                val now = System.currentTimeMillis()
-                if (downloaded == total || downloaded - lastPersistBytes >= 8L * 1024L * 1024L || now - lastPersistAt >= 2_000L) {
-                    checkpoint = checkpoint.copy(
-                        downloadedBytes = downloaded,
-                        expectedBytes = total,
-                        updatedAtEpochMs = now,
-                    )
-                    store.saveCheckpoint(checkpoint)
-                    lastPersistAt = now
-                    lastPersistBytes = downloaded
-                }
-            }
+            downloader.obtainApk(
+                candidate = candidate,
+                buildToken = token,
+                onProgress = { downloaded, total ->
+                    val now = System.currentTimeMillis()
+                    jobs.progress(candidate.runId, downloaded, total, "Build artifact ingest · $downloaded${if (total >= 0L) " / $total" else ""} bytes")
+                    if (downloaded == total || downloaded - lastPersistBytes >= 8L * 1024L * 1024L || now - lastPersistAt >= 2_000L) {
+                        checkpoint = checkpoint.copy(
+                            downloadedBytes = downloaded,
+                            expectedBytes = total,
+                            updatedAtEpochMs = now,
+                        )
+                        store.saveCheckpoint(checkpoint)
+                        lastPersistAt = now
+                        lastPersistBytes = downloaded
+                    }
+                },
+                isCancelled = { jobs.isCancelRequested(candidate.runId) },
+            )
+        } catch (cancelled: ArtifactCancelledException) {
+            return@withLock cancelled(checkpoint, "Build download cancelled; resumable partial artifact preserved.")
         } catch (failure: Throwable) {
-            return@withLock fail(checkpoint, BuildRunState.FAILED, "Build download failed: ${message(failure)}")
+            if (jobs.isCancelRequested(candidate.runId) || message(failure).contains("cancelled", true)) {
+                return@withLock cancelled(checkpoint, "Build ingest/extraction cancelled at a safe boundary.")
+            }
+            return@withLock fail(checkpoint, BuildRunState.FAILED, "Build artifact ingest failed: ${message(failure)}", resumable = true)
         }
+
+        if (jobs.isCancelRequested(candidate.runId)) return@withLock cancelled(checkpoint, "Build cancelled before verification.")
 
         checkpoint = transition(
             checkpoint.copy(apkPath = apkFile.absolutePath),
@@ -98,33 +152,45 @@ class BuildRunner(
             "Verifying exact APK SHA-256 and package metadata.",
         )
         val actualSha = runCatching { downloader.sha256(apkFile) }.getOrElse { failure ->
-            return@withLock fail(checkpoint, BuildRunState.FAILED, "Could not hash downloaded APK: ${message(failure)}")
+            return@withLock fail(checkpoint, BuildRunState.FAILED, "Could not hash downloaded APK: ${message(failure)}", resumable = true)
         }
         checkpoint = checkpoint.copy(apkSha256 = actualSha, updatedAtEpochMs = System.currentTimeMillis())
         store.saveCheckpoint(checkpoint)
+        jobs.stage(
+            candidate.runId,
+            "VERIFYING_APK",
+            "Candidate APK SHA-256 is $actualSha.",
+            cancellable = true,
+            resumable = true,
+            artifactSha256 = actualSha,
+            artifactPath = apkFile.absolutePath,
+        )
         if (!actualSha.equals(candidate.expectedApkSha256, ignoreCase = true)) {
             return@withLock fail(
                 checkpoint,
                 BuildRunState.FAILED,
                 "APK SHA-256 mismatch. Expected ${candidate.expectedApkSha256}, got $actualSha. Nothing was archived or installed.",
+                resumable = false,
             )
         }
 
         val archive = runCatching { ApkInspector.inspect(appContext, apkFile) }.getOrElse { failure ->
-            return@withLock fail(checkpoint, BuildRunState.FAILED, "Android could not parse verified APK: ${message(failure)}")
+            return@withLock fail(checkpoint, BuildRunState.FAILED, "Android could not parse verified APK: ${message(failure)}", resumable = false)
         }
         if (archive.packageName != candidate.targetPackage) {
             return@withLock fail(
                 checkpoint,
                 BuildRunState.FAILED,
                 "Verified APK package is ${archive.packageName}, expected ${candidate.targetPackage}. Nothing was installed.",
+                resumable = false,
             )
         }
 
         val projectResolution = resolveProject(candidate, archive.label)
         if (projectResolution.ambiguous) {
-            return@withLock fail(checkpoint, BuildRunState.BLOCKED_PROJECT_AMBIGUOUS, projectResolution.detail)
+            return@withLock fail(checkpoint, BuildRunState.BLOCKED_PROJECT_AMBIGUOUS, projectResolution.detail, resumable = false)
         }
+        if (jobs.isCancelRequested(candidate.runId)) return@withLock cancelled(checkpoint, "Build cancelled before archive.")
 
         checkpoint = transition(
             checkpoint.copy(projectId = projectResolution.project?.id.orEmpty()),
@@ -134,7 +200,7 @@ class BuildRunner(
         val record = try {
             archiveCandidate(candidate, apkFile, actualSha, projectResolution.project, archive.label)
         } catch (failure: Throwable) {
-            return@withLock fail(checkpoint, BuildRunState.FAILED, "APKbox archive failed: ${message(failure)}")
+            return@withLock fail(checkpoint, BuildRunState.FAILED, "APKbox archive failed: ${message(failure)}", resumable = true)
         }
         check(record.sha256.equals(actualSha, ignoreCase = true)) {
             "APKbox archive SHA differs from the verified candidate SHA."
@@ -146,6 +212,14 @@ class BuildRunner(
             updatedAtEpochMs = System.currentTimeMillis(),
         )
         store.saveCheckpoint(checkpoint)
+        jobs.stage(
+            candidate.runId,
+            "ARCHIVED",
+            checkpoint.detail,
+            cancellable = true,
+            resumable = true,
+            projectId = record.projectId,
+        )
 
         val installed = ApkInspector.inspectInstalled(appContext, candidate.targetPackage)
         if (installed != null &&
@@ -157,12 +231,14 @@ class BuildRunner(
                 checkpoint,
                 BuildRunState.BLOCKED_SIGNATURE_MISMATCH,
                 "Installed ${candidate.targetPackage} has a different signing certificate. APKbox archived the candidate but will not silently uninstall/reinstall it.",
+                resumable = false,
             )
         }
 
         if (!candidate.autoInstall) {
             return@withLock pass(checkpoint, "Verified build archived; autoInstall=false so device state was not changed.")
         }
+        if (jobs.isCancelRequested(candidate.runId)) return@withLock cancelled(checkpoint, "Build cancelled before package-manager mutation.")
 
         val alreadyInstalledSha = installedPackageSha256(candidate.targetPackage)
         if (alreadyInstalledSha.equals(actualSha, ignoreCase = true)) {
@@ -179,10 +255,18 @@ class BuildRunner(
             BuildRunState.INSTALLING,
             "Installing archived candidate unattended through ${privileged.activeTransportLabel()}.",
         )
+        jobs.stage(
+            candidate.runId,
+            "INSTALLING",
+            checkpoint.detail,
+            cancellable = false,
+            resumable = true,
+        )
         lastPersistBytes = -1L
         lastPersistAt = 0L
         val install = runCatching {
             privileged.installApk(apkFile, allowDowngrade = candidate.allowDowngrade) { sent, total ->
+                jobs.progress(candidate.runId, sent, total, "Unattended install via ${privileged.activeTransportLabel()} · $sent / $total bytes")
                 val now = System.currentTimeMillis()
                 if (sent == total || sent - lastPersistBytes >= 16L * 1024L * 1024L || now - lastPersistAt >= 2_000L) {
                     checkpoint = checkpoint.copy(
@@ -197,27 +281,35 @@ class BuildRunner(
                 }
             }
         }.getOrElse { failure ->
-            return@withLock fail(checkpoint, BuildRunState.FAILED, "Unattended install transport failed: ${message(failure)}")
+            return@withLock fail(checkpoint, BuildRunState.FAILED, "Unattended install transport failed: ${message(failure)}", resumable = true)
         }
         if (!install.success) {
             return@withLock fail(
                 checkpoint,
                 BuildRunState.FAILED,
                 "Android package manager rejected the candidate: ${install.output.take(2_000)}",
+                resumable = true,
             )
         }
 
+        jobs.stage(candidate.runId, "VERIFYING_INSTALLED", "Verifying installed base.apk SHA-256.", cancellable = false, resumable = true)
         val installedSha = installedPackageSha256(candidate.targetPackage)
         if (!installedSha.equals(actualSha, ignoreCase = true)) {
             return@withLock fail(
                 checkpoint,
                 BuildRunState.FAILED,
                 "Package manager reported success, but installed base.apk SHA '$installedSha' does not match verified candidate $actualSha.",
+                resumable = true,
             )
         }
 
         checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Exact installed base.apk SHA verified after unattended install.")
         finishAfterInstalled(candidate, checkpoint)
+    }
+
+    suspend fun resumeJob(runId: String): BuildRunCheckpoint {
+        val candidate = store.loadCandidate(runId) ?: error("Build job '$runId' has no persisted candidate.")
+        return run(candidate)
     }
 
     fun checkpoint(runId: String): BuildRunCheckpoint? = store.loadCheckpoint(runId)
@@ -232,6 +324,8 @@ class BuildRunner(
             updatedAtEpochMs = System.currentTimeMillis(),
         )
         store.saveCheckpoint(updated)
+        if (passed) jobs.succeed(runId, detail, updated.toJson().toString())
+        else jobs.fail(runId, detail, resumable = false)
         return updated
     }
 
@@ -242,22 +336,25 @@ class BuildRunner(
         var checkpoint = initial
         if (candidate.autoLaunch) {
             checkpoint = transition(checkpoint, BuildRunState.LAUNCHING, "Launching newly installed ${candidate.targetPackage}.")
+            jobs.stage(candidate.runId, "LAUNCHING", checkpoint.detail, cancellable = false, resumable = true)
             val launch = runCatching {
                 privileged.execute("monkey -p ${candidate.targetPackage} -c android.intent.category.LAUNCHER 1", 15)
             }.getOrElse { failure ->
-                return fail(checkpoint, BuildRunState.FAILED, "Installed build could not be launched: ${message(failure)}")
+                return fail(checkpoint, BuildRunState.FAILED, "Installed build could not be launched: ${message(failure)}", resumable = true)
             }
             if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
-                return fail(checkpoint, BuildRunState.FAILED, "Installed build launch failed: ${launch.output.take(2_000)}")
+                return fail(checkpoint, BuildRunState.FAILED, "Installed build launch failed: ${launch.output.take(2_000)}", resumable = true)
             }
         }
 
         if (candidate.planRunId.isNotBlank()) {
-            return transition(
+            val testing = transition(
                 checkpoint,
                 BuildRunState.TESTING,
                 "Installed and launched successfully; awaiting autonomous test plan ${candidate.planRunId}.",
             )
+            jobs.stage(candidate.runId, "TESTING", testing.detail, cancellable = false, resumable = true)
+            return testing
         }
         return pass(checkpoint, "Verified, archived, unattended-installed${if (candidate.autoLaunch) ", and launched" else ""} successfully.")
     }
@@ -267,8 +364,7 @@ class BuildRunner(
         val path = pathResult.output.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("package:") && it.endsWith("/base.apk") }
-            ?.removePrefix("package:")
-            ?: return ""
+            ?.removePrefix("package:") ?: return ""
         if (!path.matches(Regex("[/A-Za-z0-9._=:+-]+"))) return ""
         val hashResult = runCatching { privileged.execute("sha256sum $path", 20) }.getOrNull() ?: return ""
         return Regex("(?i)^[0-9a-f]{64}").find(hashResult.output.trim())?.value?.lowercase().orEmpty()
@@ -285,14 +381,12 @@ class BuildRunner(
             library.records.value.firstOrNull {
                 it.projectId == project.id && it.sha256.equals(sha256, ignoreCase = true)
             }?.let { return@withContext it }
-
             return@withContext library.importRevision(
                 projectId = project.id,
                 uri = Uri.fromFile(apkFile),
                 displayNameOverride = candidate.displayName.ifBlank { apkFile.name },
             ).record
         }
-
         library.importBase(
             uri = Uri.fromFile(apkFile),
             projectName = archiveLabel,
@@ -310,7 +404,6 @@ class BuildRunner(
             }
             return ProjectResolution(project, false, "Using explicitly selected project ${project.name}.")
         }
-
         val matches = projects.filter { it.packageName == candidate.targetPackage }
         return when (matches.size) {
             0 -> ProjectResolution(null, false, "No existing project for ${candidate.targetPackage}; APKbox will create '$archiveLabel'.")
@@ -331,23 +424,43 @@ class BuildRunner(
         state = state,
         detail = detail,
         updatedAtEpochMs = System.currentTimeMillis(),
-    ).also(store::saveCheckpoint)
+    ).also { updated ->
+        store.saveCheckpoint(updated)
+        val cancellable = state !in setOf(BuildRunState.INSTALLING, BuildRunState.LAUNCHING, BuildRunState.TESTING)
+        jobs.stage(updated.runId, state.name, detail, cancellable = cancellable, resumable = true)
+    }
 
     private fun fail(
         checkpoint: BuildRunCheckpoint,
         state: BuildRunState,
         detail: String,
+        resumable: Boolean,
     ): BuildRunCheckpoint = checkpoint.copy(
         state = state,
         detail = detail.take(4_096),
         updatedAtEpochMs = System.currentTimeMillis(),
-    ).also(store::saveCheckpoint)
+    ).also { updated ->
+        store.saveCheckpoint(updated)
+        jobs.fail(updated.runId, detail, resumable)
+    }
 
     private fun pass(checkpoint: BuildRunCheckpoint, detail: String): BuildRunCheckpoint = checkpoint.copy(
         state = BuildRunState.PASSED,
         detail = detail.take(4_096),
         updatedAtEpochMs = System.currentTimeMillis(),
-    ).also(store::saveCheckpoint)
+    ).also { updated ->
+        store.saveCheckpoint(updated)
+        jobs.succeed(updated.runId, detail, updated.toJson().toString())
+    }
+
+    private fun cancelled(checkpoint: BuildRunCheckpoint, detail: String): BuildRunCheckpoint = checkpoint.copy(
+        state = BuildRunState.FAILED,
+        detail = detail.take(4_096),
+        updatedAtEpochMs = System.currentTimeMillis(),
+    ).also { updated ->
+        store.saveCheckpoint(updated)
+        jobs.cancelled(updated.runId, detail)
+    }
 
     private fun message(failure: Throwable): String = failure.message ?: failure.javaClass.simpleName
 
