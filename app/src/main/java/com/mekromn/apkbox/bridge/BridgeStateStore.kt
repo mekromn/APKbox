@@ -19,6 +19,7 @@ data class BridgePopupMessage(
     val title: String,
     val message: String,
     val requestId: String,
+    val imageFilePath: String = "",
 )
 
 data class BridgeInFlightEnvelope(
@@ -57,6 +58,7 @@ data class BridgeInFlightEnvelope(
 class BridgeStateStore(context: Context) {
     companion object {
         private const val MAX_EVENTS = 100
+        private const val MAX_MESSAGE_IMAGE_BYTES = 8 * 1024 * 1024
     }
 
     private val root = File(context.applicationContext.filesDir, "apkbox-bridge").apply { mkdirs() }
@@ -65,6 +67,7 @@ class BridgeStateStore(context: Context) {
     private val eventsFile = File(root, "events.json")
     private val inFlightDir = File(root, "inflight").apply { mkdirs() }
     private val completedDir = File(root, "completed").apply { mkdirs() }
+    private val messageImageDir = File(root, "message-images").apply { mkdirs() }
 
     private val _events = MutableStateFlow(loadEvents())
     val events: StateFlow<List<BridgeEvent>> = _events.asStateFlow()
@@ -145,13 +148,36 @@ class BridgeStateStore(context: Context) {
     }
 
     @Synchronized
+    fun saveMessageImage(requestId: String, bytes: ByteArray): String {
+        require(bytes.isNotEmpty()) { "Picture message image is empty." }
+        require(bytes.size <= MAX_MESSAGE_IMAGE_BYTES) {
+            "Picture message exceeds the ${MAX_MESSAGE_IMAGE_BYTES}-byte local safety limit."
+        }
+        val safe = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val target = File(messageImageDir, "$safe.img")
+        val temp = File(messageImageDir, ".$safe.img.tmp")
+        temp.writeBytes(bytes)
+        if (target.exists()) target.delete()
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
+        }
+        return target.absolutePath
+    }
+
+    @Synchronized
     fun savePopup(popup: BridgePopupMessage) {
+        val previous = loadPopup()
+        if (previous != null && previous.imageFilePath != popup.imageFilePath) {
+            deleteManagedMessageImage(previous.imageFilePath)
+        }
         atomicWrite(
             popupFile,
             JSONObject()
                 .put("title", popup.title)
                 .put("message", popup.message)
                 .put("requestId", popup.requestId)
+                .put("imageFilePath", popup.imageFilePath)
                 .toString(),
         )
     }
@@ -163,12 +189,14 @@ class BridgeStateStore(context: Context) {
                 title = it.optString("title", "APKbox Bridge"),
                 message = it.optString("message"),
                 requestId = it.optString("requestId"),
+                imageFilePath = it.optString("imageFilePath"),
             )
         }
     }.getOrNull()
 
     @Synchronized
     fun clearPopup() {
+        loadPopup()?.imageFilePath?.let(::deleteManagedMessageImage)
         popupFile.delete()
     }
 
@@ -217,6 +245,14 @@ class BridgeStateStore(context: Context) {
             )
         }
         atomicWrite(eventsFile, array.toString())
+    }
+
+    private fun deleteManagedMessageImage(path: String) {
+        if (path.isBlank()) return
+        runCatching {
+            val file = File(path)
+            if (file.parentFile?.canonicalFile == messageImageDir.canonicalFile) file.delete()
+        }
     }
 
     private fun safeName(requestId: String): String =
