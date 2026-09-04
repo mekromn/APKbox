@@ -15,6 +15,28 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+enum class BridgeMessagePresentation(
+    val displayName: String,
+    val description: String,
+) {
+    STANDARD_NOTIFICATION(
+        "Standard notification",
+        "Normal notification-shade entry without forcing a heads-up popup.",
+    ),
+    HEADS_UP(
+        "Heads-up notification",
+        "High-importance notification banner that can appear briefly over the current app.",
+    ),
+    POPUP_ACTIVITY(
+        "APKbox popup activity",
+        "Current behavior: bring the full APKbox message screen to the front when Android allows it.",
+    ),
+    ALWAYS_ON_TOP(
+        "Always-on-top overlay",
+        "Persistent Package-Installer-style card above the current app until you dismiss it.",
+    ),
+}
+
 data class BridgeConfig(
     val enabled: Boolean,
     val repoOwner: String,
@@ -23,6 +45,8 @@ data class BridgeConfig(
     val pollSeconds: Int,
     val allowInformational: Boolean,
     val allowPopups: Boolean,
+    val messagePresentation: BridgeMessagePresentation,
+    val keepNotificationCopy: Boolean,
     val trustedUntilEpochMs: Long,
     val paired: Boolean,
     val hasRelayToken: Boolean,
@@ -57,6 +81,10 @@ class BridgePreferences(context: Context) {
     fun setPollSeconds(seconds: Int) = edit { putInt("pollSeconds", seconds.coerceIn(5, 300)) }
     fun setAllowInformational(value: Boolean) = edit { putBoolean("allowInformational", value) }
     fun setAllowPopups(value: Boolean) = edit { putBoolean("allowPopups", value) }
+    fun setMessagePresentation(value: BridgeMessagePresentation) = edit {
+        putString("messagePresentation", value.name)
+    }
+    fun setKeepNotificationCopy(value: Boolean) = edit { putBoolean("keepNotificationCopy", value) }
     fun setPaired(value: Boolean) = edit { putBoolean("paired", value) }
     fun setTrustedUntil(epochMs: Long) = edit { putLong("trustedUntil", epochMs) }
     fun endTrustedSession() = setTrustedUntil(0L)
@@ -82,6 +110,12 @@ class BridgePreferences(context: Context) {
             prefs.edit().putString("deviceId", created).commit()
             created
         }
+        val presentation = runCatching {
+            BridgeMessagePresentation.valueOf(
+                prefs.getString("messagePresentation", BridgeMessagePresentation.POPUP_ACTIVITY.name)
+                    ?: BridgeMessagePresentation.POPUP_ACTIVITY.name
+            )
+        }.getOrDefault(BridgeMessagePresentation.POPUP_ACTIVITY)
         return BridgeConfig(
             enabled = prefs.getBoolean("enabled", false),
             repoOwner = prefs.getString("repoOwner", "mekromn") ?: "mekromn",
@@ -90,6 +124,8 @@ class BridgePreferences(context: Context) {
             pollSeconds = prefs.getInt("pollSeconds", 10).coerceIn(5, 300),
             allowInformational = prefs.getBoolean("allowInformational", true),
             allowPopups = prefs.getBoolean("allowPopups", true),
+            messagePresentation = presentation,
+            keepNotificationCopy = prefs.getBoolean("keepNotificationCopy", true),
             trustedUntilEpochMs = prefs.getLong("trustedUntil", 0L),
             paired = prefs.getBoolean("paired", false),
             hasRelayToken = !secretStore.read().isNullOrBlank(),
