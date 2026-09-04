@@ -3,21 +3,25 @@ package com.mekromn.apkbox
 import android.content.Context
 import com.mekromn.apkbox.agent.AutonomousPlanRunner
 import com.mekromn.apkbox.agent.BuildRunner
+import com.mekromn.apkbox.artifacts.ArtifactIngestor
 import com.mekromn.apkbox.bridge.AdbBridgeManager
 import com.mekromn.apkbox.bridge.BridgeExecutor
+import com.mekromn.apkbox.bridge.BridgeInventoryCoordinator
 import com.mekromn.apkbox.bridge.BridgePreferences
 import com.mekromn.apkbox.bridge.BridgeStateStore
 import com.mekromn.apkbox.bridge.GitHubRelayClient
 import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
+import com.mekromn.apkbox.bridge.RemoteApkInstallCoordinator
 import com.mekromn.apkbox.bridge.ShizukuBridgeManager
 import com.mekromn.apkbox.data.AutoScanManager
 import com.mekromn.apkbox.data.LibraryStore
+import com.mekromn.apkbox.jobs.DurableJobEngine
 
 /**
  * Process-local service graph so UI, broadcast receivers, background scanners, build automation,
  * and the remote bridge share one writer/connection and one set of StateFlows. Master restore only
- * resets services that retain vault references; Shizuku/Sui authorization, bridge identity and ADB
- * pairing deliberately live independently of the APK vault.
+ * resets services that retain vault references; Shizuku/Sui authorization, bridge identity, durable
+ * jobs/artifacts and ADB pairing deliberately live independently of the APK vault.
  */
 object ApkBoxServices {
     private val lock = Any()
@@ -33,6 +37,10 @@ object ApkBoxServices {
     @Volatile private var bridgeExecutorInstance: BridgeExecutor? = null
     @Volatile private var autonomousPlanRunnerInstance: AutonomousPlanRunner? = null
     @Volatile private var buildRunnerInstance: BuildRunner? = null
+    @Volatile private var durableJobEngineInstance: DurableJobEngine? = null
+    @Volatile private var artifactIngestorInstance: ArtifactIngestor? = null
+    @Volatile private var remoteApkInstallInstance: RemoteApkInstallCoordinator? = null
+    @Volatile private var inventoryCoordinatorInstance: BridgeInventoryCoordinator? = null
 
     fun libraryStore(context: Context): LibraryStore =
         libraryStoreInstance ?: synchronized(lock) {
@@ -97,9 +105,44 @@ object ApkBoxServices {
      */
     fun existingPrivilegedBridge(): PrivilegedBridgeManager? = privilegedBridgeManagerInstance
 
+    fun durableJobs(context: Context): DurableJobEngine =
+        durableJobEngineInstance ?: synchronized(lock) {
+            durableJobEngineInstance ?: DurableJobEngine(context.applicationContext).also {
+                durableJobEngineInstance = it
+            }
+        }
+
+    fun artifacts(context: Context): ArtifactIngestor =
+        artifactIngestorInstance ?: synchronized(lock) {
+            artifactIngestorInstance ?: ArtifactIngestor(context.applicationContext).also {
+                artifactIngestorInstance = it
+            }
+        }
+
     fun relayClient(): GitHubRelayClient =
         relayClientInstance ?: synchronized(lock) {
             relayClientInstance ?: GitHubRelayClient().also { relayClientInstance = it }
+        }
+
+    fun remoteApkInstaller(context: Context): RemoteApkInstallCoordinator =
+        remoteApkInstallInstance ?: synchronized(lock) {
+            remoteApkInstallInstance ?: RemoteApkInstallCoordinator(
+                context = context.applicationContext,
+                library = libraryStore(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
+                jobs = durableJobs(context.applicationContext),
+                artifacts = artifacts(context.applicationContext),
+            ).also { remoteApkInstallInstance = it }
+        }
+
+    fun inventoryCoordinator(context: Context): BridgeInventoryCoordinator =
+        inventoryCoordinatorInstance ?: synchronized(lock) {
+            inventoryCoordinatorInstance ?: BridgeInventoryCoordinator(
+                context = context.applicationContext,
+                library = libraryStore(context.applicationContext),
+                privileged = privilegedBridge(context.applicationContext),
+                jobs = durableJobs(context.applicationContext),
+            ).also { inventoryCoordinatorInstance = it }
         }
 
     fun bridgeExecutor(context: Context): BridgeExecutor =
@@ -126,6 +169,8 @@ object ApkBoxServices {
                 context = context.applicationContext,
                 library = libraryStore(context.applicationContext),
                 privileged = privilegedBridge(context.applicationContext),
+                jobs = durableJobs(context.applicationContext),
+                artifacts = artifacts(context.applicationContext),
             ).also { buildRunnerInstance = it }
         }
 
@@ -134,6 +179,8 @@ object ApkBoxServices {
             autoScanManagerInstance?.shutdown()
             autoScanManagerInstance = null
             buildRunnerInstance = null
+            remoteApkInstallInstance = null
+            inventoryCoordinatorInstance = null
             libraryStoreInstance = null
         }
     }
