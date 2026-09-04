@@ -9,6 +9,7 @@ import java.io.FileOutputStream
 enum class DurableJobType {
     REMOTE_APK_INSTALL,
     BUILD_RUNNER,
+    APK_PULL,
     ARTIFACT_INGEST,
     GENERIC,
 }
@@ -156,16 +157,11 @@ class DurableJobStore(context: Context) {
     private fun jobFile(id: String) = File(root, "$id.json")
 }
 
-/**
- * Shared durable lifecycle for long APKbox work. Subsystems own the actual operation, while this
- * engine owns crash-safe state/progress/cancel/resume semantics and one consistent remote view.
- */
+/** Shared crash-safe lifecycle and status/cancel/resume model for long APKbox operations. */
 class DurableJobEngine(context: Context) {
     private val store = DurableJobStore(context.applicationContext)
 
     init {
-        // A process restart proves that an earlier RUNNING/CANCEL_REQUESTED owner vanished. Mark it
-        // INTERRUPTED instead of pretending it is still active or replaying a mutation blindly.
         store.list().filter { it.state in setOf(DurableJobState.RUNNING, DurableJobState.CANCEL_REQUESTED) }
             .forEach { stale ->
                 store.save(
