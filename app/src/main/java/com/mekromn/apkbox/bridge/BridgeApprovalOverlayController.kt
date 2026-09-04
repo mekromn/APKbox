@@ -20,6 +20,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.text.DateFormat
 import java.util.Date
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /**
@@ -37,14 +40,29 @@ object BridgeApprovalOverlayController {
 
     fun canDraw(context: Context): Boolean = Settings.canDrawOverlays(context.applicationContext)
 
+    /**
+     * Return true only after WindowManager actually accepted the overlay. RemoteBridgeService uses
+     * this as the gate for suppressing the notification fallback, so an invisible approval prompt
+     * can never be reported as successfully shown.
+     */
     fun show(context: Context, pending: BridgePendingRequest): Boolean {
         if (!canDraw(context)) return false
         val appContext = context.applicationContext
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return showOnMain(appContext, pending)
+        if (Looper.myLooper() == Looper.getMainLooper()) return showOnMain(appContext, pending)
+
+        val result = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        val posted = main.post {
+            try {
+                result.set(showOnMain(appContext, pending))
+            } finally {
+                latch.countDown()
+            }
         }
-        main.post { showOnMain(appContext, pending) }
-        return true
+        if (!posted) return false
+        return runCatching {
+            latch.await(2, TimeUnit.SECONDS) && result.get()
+        }.getOrDefault(false)
     }
 
     fun dismiss(context: Context) {
@@ -131,6 +149,9 @@ object BridgeApprovalOverlayController {
             pending.request.selector.takeIf { it.isNotBlank() }?.let {
                 append("\n\nSelector\n").append(it.take(500))
             }
+            pending.request.imagePath.takeIf { it.isNotBlank() }?.let {
+                append("\n\nImage\n").append(it.take(500))
+            }
             append("\n\nExpires\n")
             append(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM)
                 .format(Date(pending.request.expiresAtEpochMs)))
@@ -160,6 +181,24 @@ object BridgeApprovalOverlayController {
         val actions = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
+
+        val displayOptions = Button(context).apply {
+            text = "Approval display options"
+            isAllCaps = false
+            setOnClickListener {
+                dismissOnMain(context)
+                context.startActivity(
+                    Intent(context, BridgeMessageDisplaySettingsActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                )
+            }
+        }
+        actions.addView(
+            displayOptions,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                bottomMargin = dp(8)
+            },
+        )
 
         fun actionButton(label: String, action: String): Button = Button(context).apply {
             text = label
@@ -267,8 +306,13 @@ object BridgeApprovalOverlayController {
         BridgeCommandType.DUMPSYS -> "Capture dumpsys ${request.service}"
         BridgeCommandType.LAUNCH -> "Launch ${request.packageName}"
         BridgeCommandType.TOAST -> "Show a toast message"
-        BridgeCommandType.NOTIFICATION -> "Show a bridge message"
-        BridgeCommandType.POPUP -> "Show a bridge popup"
+        BridgeCommandType.NOTIFICATION -> "Show a bridge message using the local default"
+        BridgeCommandType.POPUP -> "Show a bridge popup using the local default"
+        BridgeCommandType.MESSAGE_SMALL_POPUP -> "Show a compact floating message"
+        BridgeCommandType.MESSAGE_ALWAYS_ON_TOP -> "Show a persistent always-on-top message"
+        BridgeCommandType.MESSAGE_FULL_WINDOW -> "Show a full-window bridge message"
+        BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up bridge message"
+        BridgeCommandType.PICTURE_MESSAGE -> "Show a private Continuity picture message"
         BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture the current screen"
         BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) in ${request.packageName}"
