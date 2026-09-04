@@ -54,6 +54,30 @@ class BridgeModelsTest {
     }
 
     @Test
+    fun remoteApkInstallRoundTripPreservesArchiveAndInstallOptions() {
+        val original = BridgeRequest(
+            id = "install-url-001",
+            type = BridgeCommandType.APK_INSTALL_URL,
+            downloadUrl = "https://github.com/example/app/releases/download/test/app.apk",
+            expectedApkSha256 = "a".repeat(64),
+            packageName = "com.example.app",
+            saveToProject = true,
+            projectId = "project-42",
+            projectName = "Example App",
+            displayName = "Example-test.apk",
+            archiveTitle = "Camera fix candidate",
+            archiveDescription = "Fixes black preview after the 5x lens switch.",
+            requiresBuildToken = true,
+            allowDowngrade = true,
+            autoLaunch = true,
+            reason = "Install the candidate for device validation",
+            createdAtEpochMs = 1000L,
+            expiresAtEpochMs = 2000L,
+        )
+        assertEquals(original, BridgeRequest.fromJson(original.toJson()))
+    }
+
+    @Test
     fun invalidAdvancedIdsAndImageTraversalAreRejectedDuringParsing() {
         val badRun = JSONObject()
             .put("id", "valid-id")
@@ -72,6 +96,27 @@ class BridgeModelsTest {
             .put("type", "PICTURE_MESSAGE")
             .put("imagePath", "bridge/devices/device/message-assets/../../secret.txt")
         assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badImage) }
+    }
+
+    @Test
+    fun remoteApkInstallRequiresHttpsUrlAndValidOptionalSha() {
+        val noUrl = JSONObject()
+            .put("id", "install-url-002")
+            .put("type", "APK_INSTALL_URL")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(noUrl) }
+
+        val httpUrl = JSONObject()
+            .put("id", "install-url-003")
+            .put("type", "APK_INSTALL_URL")
+            .put("downloadUrl", "http://example.com/app.apk")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(httpUrl) }
+
+        val badSha = JSONObject()
+            .put("id", "install-url-004")
+            .put("type", "APK_INSTALL_URL")
+            .put("downloadUrl", "https://example.com/app.apk")
+            .put("expectedApkSha256", "deadbeef")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badSha) }
     }
 
     @Test
