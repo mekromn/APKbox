@@ -109,6 +109,8 @@ class LibraryStore(context: Context) {
         uri: Uri,
         projectName: String? = null,
         displayNameOverride: String? = null,
+        title: String? = null,
+        description: String? = null,
     ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             val projectId = UUID.randomUUID().toString()
@@ -118,6 +120,8 @@ class LibraryStore(context: Context) {
                 isBase = true,
                 pendingProjectName = projectName,
                 displayNameOverride = displayNameOverride,
+                title = title,
+                description = description,
             )
         }
     }
@@ -126,6 +130,8 @@ class LibraryStore(context: Context) {
     suspend fun importRevision(
         uri: Uri,
         displayNameOverride: String? = null,
+        title: String? = null,
+        description: String? = null,
     ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             val project = _projects.value.singleOrNull()
@@ -135,6 +141,8 @@ class LibraryStore(context: Context) {
                 projectId = project.id,
                 isBase = false,
                 displayNameOverride = displayNameOverride,
+                title = title,
+                description = description,
             )
         }
     }
@@ -143,6 +151,8 @@ class LibraryStore(context: Context) {
         projectId: String,
         uri: Uri,
         displayNameOverride: String? = null,
+        title: String? = null,
+        description: String? = null,
     ): ImportResult = withContext(Dispatchers.IO) {
         mutex.withLock {
             require(_projects.value.any { it.id == projectId }) { "That APKbox project no longer exists." }
@@ -151,6 +161,8 @@ class LibraryStore(context: Context) {
                 projectId = projectId,
                 isBase = false,
                 displayNameOverride = displayNameOverride,
+                title = title,
+                description = description,
             )
         }
     }
@@ -161,6 +173,8 @@ class LibraryStore(context: Context) {
         isBase: Boolean,
         pendingProjectName: String? = null,
         displayNameOverride: String? = null,
+        title: String? = null,
+        description: String? = null,
     ): ImportResult {
         val current = _records.value
         val existingProject = _projects.value.firstOrNull { it.id == projectId }
@@ -177,6 +191,8 @@ class LibraryStore(context: Context) {
         val sourceDisplayName = displayNameOverride?.trim()?.takeIf { it.isNotBlank() }
             ?: directSource?.name
             ?: documentDisplayName(uri)
+        val cleanTitle = title?.trim().orEmpty().take(256)
+        val cleanDescription = description?.trim().orEmpty().take(8_192)
         val directSizeBefore = directSource?.length() ?: -1L
         val directModifiedBefore = directSource?.lastModified() ?: -1L
 
@@ -237,6 +253,8 @@ class LibraryStore(context: Context) {
                 isBase = isBase,
                 chunkCount = chunking.chunks.size,
                 newBytesAdded = chunking.uniqueBytesAdded,
+                title = cleanTitle,
+                description = cleanDescription,
             )
 
             writeManifest(record.id, chunking.chunks)
@@ -311,8 +329,23 @@ class LibraryStore(context: Context) {
             require(_records.value.any { it.id == recordId }) { "Stored APK not found." }
             val updated = sortRecords(_records.value.map {
                 if (it.id == recordId) it.copy(
-                    description = description.trim(),
-                    notes = notes.trim(),
+                    description = description.trim().take(8_192),
+                    notes = notes.trim().take(16_384),
+                ) else it
+            })
+            saveIndex(updated)
+            _records.value = updated
+        }
+    }
+
+    suspend fun updateRecordDetails(recordId: String, title: String, description: String, notes: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(_records.value.any { it.id == recordId }) { "Stored APK not found." }
+            val updated = sortRecords(_records.value.map {
+                if (it.id == recordId) it.copy(
+                    title = title.trim().take(256),
+                    description = description.trim().take(8_192),
+                    notes = notes.trim().take(16_384),
                 ) else it
             })
             saveIndex(updated)
@@ -531,7 +564,7 @@ class LibraryStore(context: Context) {
     private fun saveIndex(records: List<ApkRecord>) {
         val array = JSONArray()
         records.forEach { record -> array.put(record.toJson()) }
-        val root = JSONObject().put("schema", 3).put("records", array)
+        val root = JSONObject().put("schema", 4).put("records", array)
         val temp = File(rootDir, ".library.json.tmp")
         FileOutputStream(temp).use { output ->
             output.write(root.toString().toByteArray(Charsets.UTF_8))
@@ -720,6 +753,7 @@ class LibraryStore(context: Context) {
         .put("chunkCount", chunkCount)
         .put("newBytesAdded", newBytesAdded)
         .put("starred", starred)
+        .put("title", title)
         .put("description", description)
         .put("notes", notes)
         .put("iconUpdatedAtEpochMs", iconUpdatedAtEpochMs)
@@ -740,6 +774,7 @@ class LibraryStore(context: Context) {
         chunkCount = optInt("chunkCount", 0),
         newBytesAdded = optLong("newBytesAdded", 0L),
         starred = optBoolean("starred", false),
+        title = optString("title", ""),
         description = optString("description", ""),
         notes = optString("notes", ""),
         iconUpdatedAtEpochMs = optLong("iconUpdatedAtEpochMs", 0L),
