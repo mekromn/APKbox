@@ -149,7 +149,7 @@ data class BridgeRequest(
             val buildId = json.optString("buildId").trim().take(96)
             val imagePath = json.optString("imagePath").trim().take(1_024)
             val downloadUrl = json.optString("downloadUrl").trim().take(2_048)
-            val expectedApkSha256 = json.optString("expectedApkSha256").trim().lowercase().take(64)
+            val expectedApkSha256 = json.optString("expectedApkSha256").trim().lowercase()
             val projectId = json.optString("projectId").trim().take(128)
             if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
             if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
