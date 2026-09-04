@@ -1,132 +1,63 @@
 package com.mekromn.apkbox.agent
 
+import com.mekromn.apkbox.artifacts.ArtifactIngestor
+import com.mekromn.apkbox.artifacts.ArtifactSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.MessageDigest
 import java.util.zip.ZipFile
 
+/** Build-specific APK/ZIP extraction layered on APKbox's universal artifact ingest engine. */
 class BuildDownloader(
     private val store: BuildRunStore,
+    private val artifacts: ArtifactIngestor,
 ) {
     companion object {
         private const val BUFFER_BYTES = 1024 * 1024
-        private const val MAX_REDIRECTS = 8
-        private const val CONNECT_TIMEOUT_MS = 15_000
-        private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_BUILD_BYTES = 2L * 1024L * 1024L * 1024L
-        // HttpURLConnection does not expose a named constant for HTTP 416 on the Android/JDK API
-        // level APKbox compiles against. Keep the protocol status local instead of depending on a
-        // non-existent platform symbol.
-        private const val HTTP_RANGE_NOT_SATISFIABLE = 416
     }
 
     suspend fun obtainApk(
         candidate: BuildCandidate,
         buildToken: String?,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+        isCancelled: () -> Boolean = { false },
     ): File = withContext(Dispatchers.IO) {
-        val finalSource = store.sourceFile(candidate.runId, candidate.sourceFormat)
-        if (!finalSource.isFile || finalSource.length() == 0L) {
-            download(candidate, buildToken, finalSource, onProgress)
-        }
-
-        when (candidate.sourceFormat) {
-            BuildSourceFormat.APK -> finalSource
-            BuildSourceFormat.ZIP_APK -> extractApk(candidate, finalSource)
-        }
-    }
-
-    fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered(BUFFER_BYTES).use { input ->
-            val buffer = ByteArray(BUFFER_BYTES)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                if (count > 0) digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    private fun download(
-        candidate: BuildCandidate,
-        token: String?,
-        finalSource: File,
-        onProgress: (Long, Long) -> Unit,
-    ) {
         if (candidate.requiresBuildToken) {
-            require(!token.isNullOrBlank()) {
+            require(!buildToken.isNullOrBlank()) {
                 "This private build requires the separately encrypted read-only build-source token."
             }
-            require(isGitHubHost(URL(candidate.downloadUrl).host)) {
-                "APKbox never sends a GitHub build token to a non-GitHub host."
-            }
         }
 
-        val part = store.sourcePartFile(candidate.runId)
-        part.parentFile?.mkdirs()
-        var restartBudget = 1
-        while (true) {
-            val offset = part.takeIf { it.isFile }?.length()?.coerceAtLeast(0L) ?: 0L
-            val response = openFollowingRedirects(candidate.downloadUrl, offset, candidate.requiresBuildToken, token)
-            try {
-                if (response.responseCode == HTTP_RANGE_NOT_SATISFIABLE && restartBudget-- > 0) {
-                    part.delete()
-                    continue
-                }
-                check(response.responseCode == HttpURLConnection.HTTP_OK || response.responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                    "Build download HTTP ${response.responseCode}."
-                }
+        // For a raw APK, the candidate's expected SHA is also the network artifact SHA and can
+        // produce a content-addressed cache hit. ZIP_APK candidates define the SHA of the extracted
+        // APK, so the ZIP itself is downloaded without pretending it has that digest.
+        val artifact = artifacts.ingest(
+            ArtifactSpec(
+                jobId = candidate.runId,
+                sourceUrl = candidate.downloadUrl,
+                expectedSha256 = if (candidate.sourceFormat == BuildSourceFormat.APK) candidate.expectedApkSha256 else "",
+                requiresBuildToken = candidate.requiresBuildToken,
+                maxBytes = MAX_BUILD_BYTES,
+                userAgent = "APKbox-Build-Runner",
+                accept = "application/octet-stream",
+            ),
+            onProgress = onProgress,
+            isCancelled = isCancelled,
+        )
 
-                val append = response.responseCode == HttpURLConnection.HTTP_PARTIAL && offset > 0L
-                if (!append && part.exists()) part.delete()
-                val base = if (append) offset else 0L
-                val contentLength = response.contentLengthLong.takeIf { it >= 0L } ?: -1L
-                val total = if (contentLength >= 0L) base + contentLength else -1L
-                if (total > MAX_BUILD_BYTES) error("Build download exceeds APKbox's ${MAX_BUILD_BYTES}-byte safety limit.")
-
-                BufferedInputStream(response.inputStream, BUFFER_BYTES).use { input ->
-                    BufferedOutputStream(FileOutputStream(part, append), BUFFER_BYTES).use { output ->
-                        val buffer = ByteArray(BUFFER_BYTES)
-                        var downloaded = base
-                        onProgress(downloaded, total)
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            if (count == 0) continue
-                            downloaded += count
-                            check(downloaded <= MAX_BUILD_BYTES) { "Build download exceeded APKbox's safety limit." }
-                            output.write(buffer, 0, count)
-                            onProgress(downloaded, total)
-                        }
-                        output.flush()
-                    }
-                }
-
-                check(part.isFile && part.length() > 0L) { "Build download produced an empty file." }
-                if (total >= 0L) check(part.length() == total) {
-                    "Build download ended at ${part.length()} of $total bytes."
-                }
-                if (finalSource.exists() && !finalSource.delete()) error("Could not replace previous build source.")
-                if (!part.renameTo(finalSource)) {
-                    part.copyTo(finalSource, overwrite = true)
-                    part.delete()
-                }
-                return
-            } finally {
-                response.disconnect()
-            }
+        when (candidate.sourceFormat) {
+            BuildSourceFormat.APK -> artifact.file
+            BuildSourceFormat.ZIP_APK -> extractApk(candidate, artifact.file, isCancelled)
         }
     }
 
-    private fun extractApk(candidate: BuildCandidate, archive: File): File {
+    fun sha256(file: File): String = artifacts.sha256(file)
+
+    private fun extractApk(candidate: BuildCandidate, archive: File, isCancelled: () -> Boolean): File {
         val target = store.extractedApkFile(candidate.runId)
         if (target.isFile && target.length() > 0L) return target
 
@@ -154,6 +85,7 @@ class BuildDownloader(
                     BufferedOutputStream(FileOutputStream(temp), BUFFER_BYTES).use { output ->
                         val buffer = ByteArray(BUFFER_BYTES)
                         while (true) {
+                            if (isCancelled()) error("Build extraction cancelled at a safe boundary.")
                             val count = input.read(buffer)
                             if (count < 0) break
                             if (count == 0) continue
@@ -174,45 +106,5 @@ class BuildDownloader(
             }
         }
         return target
-    }
-
-    private fun openFollowingRedirects(
-        initialUrl: String,
-        offset: Long,
-        requiresToken: Boolean,
-        token: String?,
-    ): HttpURLConnection {
-        var current = URL(initialUrl)
-        repeat(MAX_REDIRECTS + 1) { redirectIndex ->
-            check(current.protocol.equals("https", ignoreCase = true)) { "Build redirects must stay on HTTPS." }
-            val connection = current.openConnection() as HttpURLConnection
-            connection.instanceFollowRedirects = false
-            connection.requestMethod = "GET"
-            connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = READ_TIMEOUT_MS
-            connection.setRequestProperty("User-Agent", "APKbox-Build-Runner")
-            connection.setRequestProperty("Accept", "application/octet-stream")
-            if (offset > 0L) connection.setRequestProperty("Range", "bytes=$offset-")
-            if (requiresToken && !token.isNullOrBlank() && isGitHubHost(current.host)) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-            }
-            val code = connection.responseCode
-            if (code !in 300..399) return connection
-            val location = connection.getHeaderField("Location")
-                ?: run {
-                    connection.disconnect()
-                    error("Build redirect did not contain a Location header.")
-                }
-            connection.disconnect()
-            check(redirectIndex < MAX_REDIRECTS) { "Too many build download redirects." }
-            current = URL(current, location)
-        }
-        error("Too many build download redirects.")
-    }
-
-    private fun isGitHubHost(host: String): Boolean {
-        val lower = host.lowercase()
-        return lower == "github.com" || lower == "api.github.com" || lower.endsWith(".github.com")
     }
 }
