@@ -19,7 +19,10 @@ class BridgeExecutor(
     private val stateStore: BridgeStateStore,
 ) {
     companion object {
+        /** Legacy channel retained for already-installed builds; new messages use mode-specific channels. */
         const val INFO_CHANNEL_ID = "apkbox-bridge-info"
+        private const val INFO_STANDARD_CHANNEL_ID = "apkbox-bridge-info-standard-v1"
+        private const val INFO_HEADS_UP_CHANNEL_ID = "apkbox-bridge-info-headsup-v1"
         private const val INFO_NOTIFICATION_BASE = 74_000
         private val packageRegex = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
         private val serviceRegex = Regex("[A-Za-z0-9_.:-]{1,128}")
@@ -69,13 +72,10 @@ class BridgeExecutor(
                     }
                     success(request, risk, "Toast delivered.", started)
                 }
-                BridgeCommandType.NOTIFICATION -> {
-                    postInformationNotification(request)
-                    success(request, risk, "Notification delivered.", started)
-                }
+                BridgeCommandType.NOTIFICATION,
                 BridgeCommandType.POPUP -> {
-                    deliverPopup(request)
-                    success(request, risk, "Popup/instruction delivered.", started)
+                    val detail = deliverConfiguredMessage(request)
+                    success(request, risk, detail, started)
                 }
                 BridgeCommandType.LOGCAT -> executeShell(
                     request,
@@ -213,22 +213,72 @@ class BridgeExecutor(
         uiFingerprint = result.uiFingerprint,
     )
 
-    private suspend fun deliverPopup(request: BridgeRequest) {
+    /**
+     * Local presentation is a user preference. The relay cannot force an intrusive overlay merely by
+     * choosing NOTIFICATION versus POPUP; both informational request types are rendered according to
+     * this phone's configured mode. TOAST intentionally remains a toast.
+     */
+    private suspend fun deliverConfiguredMessage(request: BridgeRequest): String {
         val popup = BridgePopupMessage(
-            title = request.title.ifBlank { "ChatGPT instruction" }.take(256),
-            message = request.message.take(8_192),
+            title = request.title.ifBlank { "ChatGPT via APKbox" }.take(256),
+            message = request.message.ifBlank { request.reason }.take(8_192),
             requestId = request.id,
         )
         stateStore.savePopup(popup)
-        postInformationNotification(request)
-        if (privileged.ensureReady()) {
-            runCatching {
-                privileged.execute(
-                    "am start -n ${appContext.packageName}/.bridge.BridgeMessageActivity --activity-new-task",
-                    8,
-                )
+        val config = prefs.state.value
+
+        return when (config.messagePresentation) {
+            BridgeMessagePresentation.STANDARD_NOTIFICATION -> {
+                postInformationNotification(request, headsUp = false)
+                "Bridge message delivered as a standard notification."
+            }
+            BridgeMessagePresentation.HEADS_UP -> {
+                postInformationNotification(request, headsUp = true)
+                "Bridge message delivered as a heads-up notification."
+            }
+            BridgeMessagePresentation.POPUP_ACTIVITY -> {
+                if (config.keepNotificationCopy) postInformationNotification(request, headsUp = false)
+                if (launchPopupActivity()) {
+                    "Bridge message delivered as the APKbox popup activity${if (config.keepNotificationCopy) " with a notification copy" else ""}."
+                } else {
+                    postInformationNotification(request, headsUp = true)
+                    "Android did not surface the popup activity; APKbox used a heads-up notification fallback."
+                }
+            }
+            BridgeMessagePresentation.ALWAYS_ON_TOP -> {
+                val shown = BridgeOverlayController.show(appContext, popup, stateStore)
+                if (shown) {
+                    if (config.keepNotificationCopy) postInformationNotification(request, headsUp = false)
+                    "Bridge message delivered as a persistent always-on-top overlay${if (config.keepNotificationCopy) " with a notification copy" else ""}."
+                } else {
+                    postInformationNotification(request, headsUp = true)
+                    "Always-on-top permission is unavailable; APKbox used a heads-up notification fallback. Open Display options to grant Draw over other apps."
+                }
             }
         }
+    }
+
+    private suspend fun launchPopupActivity(): Boolean {
+        // Privileged am start is the most reliable route when Android background-activity policy
+        // would otherwise suppress a service-started Activity. Direct Activity start remains a
+        // fallback for cases where no privileged transport is currently needed/available.
+        if (runCatching { privileged.ensureReady() }.getOrDefault(false)) {
+            val shell = runCatching {
+                privileged.execute(
+                    "am start -n ${appContext.packageName}/.bridge.BridgeMessageActivity --activity-new-task --activity-clear-top",
+                    8,
+                )
+            }.getOrNull()
+            if (shell != null && !shell.timedOut && (shell.exitCode == null || shell.exitCode == 0)) return true
+        }
+
+        val intent = Intent(appContext, BridgeMessageActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        return runCatching {
+            appContext.startActivity(intent)
+            true
+        }.getOrDefault(false)
     }
 
     private suspend fun executeShell(
@@ -299,48 +349,75 @@ class BridgeExecutor(
         durationMs = System.currentTimeMillis() - started,
     )
 
-    private fun postInformationNotification(request: BridgeRequest) {
-        val intent = Intent(appContext, BridgeMessageActivity::class.java).apply {
+    private fun postInformationNotification(request: BridgeRequest, headsUp: Boolean) {
+        val openMessage = Intent(appContext, BridgeMessageActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
-        if (request.type != BridgeCommandType.POPUP) {
-            stateStore.savePopup(
-                BridgePopupMessage(
-                    title = request.title.ifBlank { "ChatGPT via APKbox" },
-                    message = request.message.ifBlank { request.reason },
-                    requestId = request.id,
-                )
-            )
-        }
-        val pending = PendingIntent.getActivity(
+        val openPending = PendingIntent.getActivity(
             appContext,
             request.id.hashCode(),
-            intent,
+            openMessage,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(appContext, INFO_CHANNEL_ID)
+        val settingsIntent = Intent(appContext, BridgeMessageDisplaySettingsActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val settingsPending = PendingIntent.getActivity(
+            appContext,
+            request.id.hashCode() xor 0x4B17,
+            settingsIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val text = request.message.ifBlank { request.reason }.take(8_000)
+        val notification = NotificationCompat.Builder(
+            appContext,
+            if (headsUp) INFO_HEADS_UP_CHANNEL_ID else INFO_STANDARD_CHANNEL_ID,
+        )
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle(request.title.ifBlank { "ChatGPT via APKbox" }.take(120))
-            .setContentText(request.message.ifBlank { request.reason }.take(240))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(request.message.ifBlank { request.reason }.take(8_000)))
-            .setContentIntent(pending)
+            .setContentText(text.take(240))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openPending)
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(if (headsUp) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(android.R.drawable.ic_menu_preferences, "Display options", settingsPending)
             .build()
         notificationManager.notify(INFO_NOTIFICATION_BASE + (request.id.hashCode() and 0x0FFF), notification)
     }
 
     private fun createChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            notificationManager.createNotificationChannel(
-                NotificationChannel(
-                    INFO_CHANNEL_ID,
-                    "APKbox ChatGPT messages",
-                    NotificationManager.IMPORTANCE_HIGH,
-                ).apply {
-                    description = "Messages and debugging instructions delivered through APKbox Remote Bridge"
-                }
-            )
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        // Keep legacy channel so existing notification settings are not removed unexpectedly.
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                INFO_CHANNEL_ID,
+                "APKbox ChatGPT messages (legacy)",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Legacy bridge message channel retained for compatibility"
+            }
+        )
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                INFO_STANDARD_CHANNEL_ID,
+                "APKbox bridge messages",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "Standard ChatGPT messages delivered through APKbox Remote Bridge"
+            }
+        )
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                INFO_HEADS_UP_CHANNEL_ID,
+                "APKbox bridge heads-up messages",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Heads-up ChatGPT messages delivered through APKbox Remote Bridge"
+                enableVibration(true)
+            }
+        )
     }
 }
