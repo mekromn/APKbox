@@ -284,8 +284,16 @@ class RemoteBridgeService : Service() {
                     "Use AGENT_STATUS with runId '${inFlight.request.runId}' to inspect APKbox's persisted autonomous checkpoint; do not blindly repeat the start/resume request."
                 BridgeCommandType.BUILD_START ->
                     "Use BUILD_STATUS with runId/buildId from this request to inspect APKbox's persisted build checkpoint; do not blindly repeat BUILD_START."
-                BridgeCommandType.APK_INSTALL_URL ->
-                    "A direct APK install may have downloaded, archived, or installed before interruption. Inspect the installed package/project state and never blindly replay this request ID. A new request should use a new ID after state is confirmed."
+                BridgeCommandType.APK_INSTALL_URL -> {
+                    val job = inFlight.request.jobId.ifBlank { inFlight.request.id }
+                    "Use JOB_STATUS for '$job'; if the durable job is resumable, use a fresh JOB_RESUME request instead of repeating APK_INSTALL_URL."
+                }
+                BridgeCommandType.APK_PULL -> {
+                    val job = inFlight.request.jobId.ifBlank { inFlight.request.id }
+                    "Use JOB_STATUS for '$job'; APK pull progress is chunk-boundary durable and can resume with JOB_RESUME."
+                }
+                BridgeCommandType.JOB_RESUME ->
+                    "Use JOB_STATUS for '${inFlight.request.jobId}' before deciding whether another resume is needed."
                 else ->
                     "The operation's final effect is ambiguous, so APKbox will not replay the same request automatically. Inspect device state before issuing a new request ID."
             }
@@ -534,6 +542,8 @@ class RemoteBridgeService : Service() {
                         pending.request.buildId.takeIf { it.isNotBlank() }?.let {
                             append("\nBuild ID: ").append(it)
                         }
+                        pending.request.jobId.takeIf { it.isNotBlank() }?.let { append("\nJob ID: ").append(it) }
+                        pending.request.apkRecordId.takeIf { it.isNotBlank() }?.let { append("\nAPK record: ").append(it) }
                         pending.request.command.takeIf { it.isNotBlank() }?.let {
                             append("\n\n")
                             append(it.take(2_000))
@@ -575,7 +585,12 @@ class RemoteBridgeService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .addAction(0, "Deny", deny)
-            .addAction(0, if (pending.request.type == BridgeCommandType.APK_INSTALL_URL) "Install APK" else "Allow once", allowOnce)
+            .addAction(0, when (pending.request.type) {
+                BridgeCommandType.APK_INSTALL_URL -> "Install APK"
+                BridgeCommandType.JOB_CANCEL -> "Cancel job"
+                BridgeCommandType.JOB_RESUME -> "Resume job"
+                else -> "Allow once"
+            }, allowOnce)
             .addAction(android.R.drawable.ic_menu_preferences, "Display", displayOptions)
 
         if (BridgePolicy.trustedSessionEligible(pending.request)) {
@@ -688,7 +703,20 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.MESSAGE_FULL_WINDOW -> "Full-window message: ${request.message.take(180)}"
         BridgeCommandType.MESSAGE_HEADS_UP -> "Heads-up message: ${request.message.take(180)}"
         BridgeCommandType.PICTURE_MESSAGE -> "Picture message: ${request.title.ifBlank { request.imagePath }.take(180)}"
-        BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install APK from ${request.downloadUrl.take(150)}${if (request.saveToProject) " and save it to APKbox" else ""}"
+        BridgeCommandType.APK_INSTALL_URL -> "Resolve/download and unattended-install APK from ${request.downloadUrl.take(150)}${if (request.saveToProject) " and save it to APKbox" else ""}"
+        BridgeCommandType.JOB_LIST -> "List durable APKbox jobs"
+        BridgeCommandType.JOB_STATUS -> "Read job ${request.jobId}"
+        BridgeCommandType.JOB_CANCEL -> "Cancel job ${request.jobId} at a safe boundary"
+        BridgeCommandType.JOB_RESUME -> "Resume job ${request.jobId}"
+        BridgeCommandType.PROJECT_LIST -> "List APKbox projects"
+        BridgeCommandType.PROJECT_GET -> "Read project ${request.projectId}"
+        BridgeCommandType.APK_LIST -> "List stored APK records"
+        BridgeCommandType.APK_SEARCH -> "Search APKbox for '${request.query}'"
+        BridgeCommandType.APK_INSPECT -> "Inspect exact APK record ${request.apkRecordId}"
+        BridgeCommandType.APK_PULL -> "Pull exact APK record ${request.apkRecordId}"
+        BridgeCommandType.PACKAGE_STATE -> "Inspect package state for ${request.packageName}"
+        BridgeCommandType.INSTALLED_APPS -> "List installed apps"
+        BridgeCommandType.DEVICE_STATE -> "Read structured device state"
         BridgeCommandType.UI_SNAPSHOT -> "Read current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture current screen"
         BridgeCommandType.UI_TAP -> "Tap ${request.x},${request.y} in ${request.packageName}"

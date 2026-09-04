@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import com.mekromn.apkbox.artifacts.ArtifactCancelledException
 import com.mekromn.apkbox.artifacts.ArtifactIngestor
+import com.mekromn.apkbox.artifacts.ArtifactSourceResolver
 import com.mekromn.apkbox.artifacts.ArtifactSpec
 import com.mekromn.apkbox.artifacts.IngestedArtifact
 import com.mekromn.apkbox.data.ApkInspector
@@ -29,6 +30,7 @@ class RemoteApkInstallCoordinator(
     private val privileged: PrivilegedBridgeManager,
     private val jobs: DurableJobEngine,
     private val artifacts: ArtifactIngestor,
+    private val resolver: ArtifactSourceResolver,
 ) {
     companion object {
         private const val MAX_APK_BYTES = 2L * 1024L * 1024L * 1024L
@@ -125,13 +127,16 @@ class RemoteApkInstallCoordinator(
         if (expectedPackage.isNotBlank() && !PACKAGE_REGEX.matches(expectedPackage)) {
             return fail(responseRequestId, risk, started, jobId, "Invalid expected package name.", resumable = false)
         }
-        if (request.requiresBuildToken && !artifacts.hasBuildToken()) {
+        val fastestLocal = if (expectedSha.isNotBlank()) {
+            runCatching { resolver.resolveExact(expectedSha, expectedPackage) }.getOrNull()
+        } else null
+        if (fastestLocal == null && request.requiresBuildToken && !artifacts.hasBuildToken()) {
             return fail(
                 responseRequestId,
                 risk,
                 started,
                 jobId,
-                "This APK URL requires the encrypted APKbox build-source token, but none is configured.",
+                "This APK URL requires the encrypted APKbox build-source token, but no faster exact local source was found and no token is configured.",
                 resumable = true,
             )
         }
@@ -145,7 +150,17 @@ class RemoteApkInstallCoordinator(
                 resumable = true,
             )
             val prior = jobs.get(jobId)
-            prior?.artifactSha256
+            fastestLocal?.let { resolved ->
+                jobs.progress(jobId, resolved.sizeBytes, resolved.sizeBytes, "Reused exact ${resolved.sourceKind.name.lowercase().replace('_', ' ')} source; network skipped.")
+                IngestedArtifact(
+                    sha256 = resolved.sha256,
+                    sizeBytes = resolved.sizeBytes,
+                    file = resolved.file,
+                    sourceUrl = "local://${resolved.sourceKind.name.lowercase()}",
+                    resumedBytes = resolved.sizeBytes,
+                    cacheHit = true,
+                )
+            } ?: prior?.artifactSha256
                 ?.takeIf { it.isNotBlank() }
                 ?.let(artifacts::objectForSha)
                 ?.let { file ->
@@ -347,6 +362,7 @@ class RemoteApkInstallCoordinator(
             .put("label", archive.label)
             .put("apkSha256", artifact.sha256)
             .put("artifactCacheHit", artifact.cacheHit)
+            .put("artifactSource", artifact.sourceUrl)
             .put("artifactResumedFromBytes", artifact.resumedBytes)
             .put("downloadedBytes", artifact.sizeBytes)
             .put("installedBaseApkSha256", installedSha)

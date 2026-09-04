@@ -159,6 +159,8 @@ private fun ApprovalScreen(
                 InfoSection("Build ID", request.buildId.ifBlank { "Not supplied" })
                 InfoSection("Run ID", request.runId.ifBlank { "Not supplied" })
             }
+            if (request.jobId.isNotBlank()) InfoSection("Job ID", request.jobId)
+            if (request.apkRecordId.isNotBlank()) InfoSection("APKbox record ID", request.apkRecordId)
             if (request.type == BridgeCommandType.APK_INSTALL_URL) {
                 InfoSection("APK source", request.downloadUrl)
                 if (request.packageName.isNotBlank()) InfoSection("Expected package", request.packageName)
@@ -210,7 +212,9 @@ private fun ApprovalScreen(
                     request.type == BridgeCommandType.BUILD_START ->
                         "This may download, archive, install, downgrade, launch, and optionally test the exact build candidate described in Continuity. APKbox always requires a fresh on-device approval for BUILD_START."
                     request.type == BridgeCommandType.APK_INSTALL_URL ->
-                        "This downloads the complete APK before installation, computes SHA-256, verifies package/SHA constraints, optionally archives the exact bytes, unattended-installs through Shizuku/Sui or Wireless ADB, and verifies installed base.apk SHA-256. It always requires a fresh approval. Signature-conflicting installed apps are never silently removed."
+                        "This resolves the fastest exact local source first when an expected SHA is known, otherwise downloads the complete APK, verifies it, optionally archives it, unattended-installs it, and verifies installed base.apk SHA-256. It always requires fresh approval."
+                    request.type == BridgeCommandType.JOB_RESUME ->
+                        "Resuming a durable job may continue a package mutation, so it always requires fresh approval and uses the persisted original job payload."
                     pending.risk == BridgeRisk.READ_ONLY ->
                         "Read-only debugging can be covered by a temporary trusted session."
                     pending.risk == BridgeRisk.DEBUG_ACTION ->
@@ -234,6 +238,8 @@ private fun confirmLabel(type: BridgeCommandType): String = when (type) {
     BridgeCommandType.AGENT_RESUME -> "Resume plan"
     BridgeCommandType.BUILD_START -> "Start build"
     BridgeCommandType.APK_INSTALL_URL -> "Install APK"
+    BridgeCommandType.JOB_CANCEL -> "Cancel job"
+    BridgeCommandType.JOB_RESUME -> "Resume job"
     else -> "Allow once"
 }
 
@@ -281,7 +287,20 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.MESSAGE_FULL_WINDOW -> "Open a full-window APKbox message"
     BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up notification"
     BridgeCommandType.PICTURE_MESSAGE -> "Fetch and show a private Continuity image with title/caption"
-    BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install an APK directly from an HTTPS URL${if (request.saveToProject) ", saving the exact verified APK to an APKbox project" else ""}"
+    BridgeCommandType.APK_INSTALL_URL -> "Resolve/download and unattended-install an exact APK${if (request.saveToProject) ", saving it to an APKbox project" else ""}"
+    BridgeCommandType.JOB_LIST -> "List APKbox durable jobs"
+    BridgeCommandType.JOB_STATUS -> "Read durable job '${request.jobId}'"
+    BridgeCommandType.JOB_CANCEL -> "Cancel durable job '${request.jobId}' at its next safe boundary"
+    BridgeCommandType.JOB_RESUME -> "Resume durable job '${request.jobId}' from its persisted operation"
+    BridgeCommandType.PROJECT_LIST -> "List APKbox projects"
+    BridgeCommandType.PROJECT_GET -> "Read APKbox project '${request.projectId}' and its records"
+    BridgeCommandType.APK_LIST -> "List stored APK records"
+    BridgeCommandType.APK_SEARCH -> "Search stored APKs for '${request.query}'"
+    BridgeCommandType.APK_INSPECT -> "Inspect exact APKbox record '${request.apkRecordId}' without pulling the full file"
+    BridgeCommandType.APK_PULL -> "Pull exact APKbox record '${request.apkRecordId}' into verified private Continuity chunks"
+    BridgeCommandType.PACKAGE_STATE -> "Inspect installed/stored state for ${request.packageName}"
+    BridgeCommandType.INSTALLED_APPS -> "List installed Android apps"
+    BridgeCommandType.DEVICE_STATE -> "Read structured APKbox/device/transport state"
     BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy${request.packageName.takeIf { it.isNotBlank() }?.let { " for $it" }.orEmpty()}"
     BridgeCommandType.SCREENSHOT -> "Capture the current screen as a private Continuity artifact"
     BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) inside ${request.packageName}"

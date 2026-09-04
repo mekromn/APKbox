@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.mekromn.apkbox.ApkBoxServices
 import com.mekromn.apkbox.agent.AgentActionLedger
+import com.mekromn.apkbox.jobs.DurableJobType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -37,13 +38,10 @@ class BridgeExecutor(
     private val prefs by lazy { ApkBoxServices.bridgePreferences(appContext) }
     private val relay by lazy { ApkBoxServices.relayClient() }
     private val advanced by lazy { AdvancedBridgeCoordinator(appContext, relay) }
-    private val remoteApkInstaller by lazy {
-        RemoteApkInstallCoordinator(
-            context = appContext,
-            library = ApkBoxServices.libraryStore(appContext),
-            privileged = privileged,
-        )
-    }
+    private val remoteApkInstaller by lazy { ApkBoxServices.remoteApkInstaller(appContext) }
+    private val inventory by lazy { ApkBoxServices.inventoryCoordinator(appContext) }
+    private val retrieval by lazy { ApkBoxServices.apkRetrievalCoordinator(appContext) }
+    private val jobs by lazy { ApkBoxServices.durableJobs(appContext) }
 
     init {
         createChannels()
@@ -104,6 +102,19 @@ class BridgeExecutor(
                 }
 
                 BridgeCommandType.APK_INSTALL_URL -> remoteApkInstaller.execute(request, risk)
+                BridgeCommandType.PROJECT_LIST,
+                BridgeCommandType.PROJECT_GET,
+                BridgeCommandType.APK_LIST,
+                BridgeCommandType.APK_SEARCH,
+                BridgeCommandType.PACKAGE_STATE,
+                BridgeCommandType.INSTALLED_APPS,
+                BridgeCommandType.DEVICE_STATE,
+                BridgeCommandType.JOB_LIST,
+                BridgeCommandType.JOB_STATUS -> inventory.execute(request, risk)
+                BridgeCommandType.APK_INSPECT -> retrieval.inspect(request, risk)
+                BridgeCommandType.APK_PULL -> executeApkPull(request, risk)
+                BridgeCommandType.JOB_CANCEL,
+                BridgeCommandType.JOB_RESUME -> executeJobControl(request, risk)
 
                 BridgeCommandType.LOGCAT -> executeShell(
                     request,
@@ -204,6 +215,68 @@ class BridgeExecutor(
     }
 
     fun deleteLocalArtifact(path: String) = screenAgent.deleteLocalArtifact(path)
+
+    private suspend fun executeApkPull(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
+        val config = prefs.state.value
+        check(config.enabled) { "Remote Debug Bridge is not enabled." }
+        val token = prefs.relayToken()
+        check(token.isNotBlank()) { "Continuity relay token is not configured." }
+        return retrieval.pull(request, risk, config, token)
+    }
+
+    private suspend fun executeJobControl(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
+        val started = System.currentTimeMillis()
+        val job = jobs.get(request.jobId) ?: return BridgeResult(
+            requestId = request.id,
+            status = BridgeResultStatus.INVALID,
+            risk = risk,
+            detail = "Job '${request.jobId}' was not found.",
+            durationMs = System.currentTimeMillis() - started,
+        )
+        return when (request.type) {
+            BridgeCommandType.JOB_CANCEL -> {
+                val updated = jobs.requestCancel(request.jobId)
+                BridgeResult(
+                    requestId = request.id,
+                    status = BridgeResultStatus.SUCCESS,
+                    risk = risk,
+                    detail = updated.detail,
+                    output = updated.toJson().toString(2),
+                    durationMs = System.currentTimeMillis() - started,
+                )
+            }
+            BridgeCommandType.JOB_RESUME -> when (job.type) {
+                DurableJobType.BUILD_RUNNER -> {
+                    val checkpoint = ApkBoxServices.buildRunner(appContext).resumeJob(request.jobId)
+                    BridgeResult(
+                        requestId = request.id,
+                        status = BridgeResultStatus.SUCCESS,
+                        risk = risk,
+                        detail = checkpoint.detail,
+                        output = checkpoint.toJson().toString(2),
+                        durationMs = System.currentTimeMillis() - started,
+                    )
+                }
+                DurableJobType.REMOTE_APK_INSTALL -> remoteApkInstaller.resume(request.jobId, request, risk)
+                DurableJobType.APK_PULL -> {
+                    val config = prefs.state.value
+                    check(config.enabled) { "Remote Debug Bridge is not enabled." }
+                    val token = prefs.relayToken()
+                    check(token.isNotBlank()) { "Continuity relay token is not configured." }
+                    retrieval.resumePull(request, risk, config, token)
+                }
+                DurableJobType.ARTIFACT_INGEST,
+                DurableJobType.GENERIC -> BridgeResult(
+                    requestId = request.id,
+                    status = BridgeResultStatus.INVALID,
+                    risk = risk,
+                    detail = "Job '${request.jobId}' of type ${job.type} has no executable resume adapter.",
+                    durationMs = System.currentTimeMillis() - started,
+                )
+            }
+            else -> error("${request.type} is not a job-control command.")
+        }
+    }
 
     private suspend fun executeAdvanced(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
         check(AdvancedBridgeCoordinator.handles(request.type)) { "Unsupported advanced bridge request ${request.type}." }

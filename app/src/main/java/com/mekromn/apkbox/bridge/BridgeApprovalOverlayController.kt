@@ -143,6 +143,8 @@ object BridgeApprovalOverlayController {
             append(summary(pending.request))
             pending.request.runId.takeIf { it.isNotBlank() }?.let { append("\n\nRun ID\n").append(it) }
             pending.request.buildId.takeIf { it.isNotBlank() }?.let { append("\n\nBuild ID\n").append(it) }
+            pending.request.jobId.takeIf { it.isNotBlank() }?.let { append("\n\nJob ID\n").append(it) }
+            pending.request.apkRecordId.takeIf { it.isNotBlank() }?.let { append("\n\nAPKbox record ID\n").append(it) }
             pending.request.command.takeIf { it.isNotBlank() }?.let {
                 append("\n\nCommand\n").append(it.take(2_000))
             }
@@ -255,6 +257,8 @@ object BridgeApprovalOverlayController {
                     BridgeCommandType.AGENT_START -> "Start plan"
                     BridgeCommandType.BUILD_START -> "Start build"
                     BridgeCommandType.APK_INSTALL_URL -> "Install APK"
+                    BridgeCommandType.JOB_CANCEL -> "Cancel job"
+                    BridgeCommandType.JOB_RESUME -> "Resume job"
                     else -> "Allow once"
                 },
                 RemoteBridgeService.ACTION_APPROVE_ONCE,
@@ -318,7 +322,9 @@ object BridgeApprovalOverlayController {
         pending.request.type == BridgeCommandType.BUILD_START ->
             "Build Runner can change installed app state, so BUILD_START always requires a fresh approval."
         pending.request.type == BridgeCommandType.APK_INSTALL_URL ->
-            "Direct URL installation always requires a fresh approval. APKbox downloads and hashes the full APK before unattended install, verifies installed bytes afterward, and never silently removes a signature-conflicting app."
+            "Direct APK installation always requires fresh approval; APKbox prefers a proven faster exact local source before network retrieval."
+        pending.request.type == BridgeCommandType.JOB_RESUME ->
+            "Durable job resume always requires fresh approval because the persisted job may continue a device mutation."
         pending.risk == BridgeRisk.READ_ONLY ->
             "Read-only debugging can be covered by a temporary trusted session."
         pending.risk == BridgeRisk.DEBUG_ACTION ->
@@ -342,7 +348,20 @@ object BridgeApprovalOverlayController {
         BridgeCommandType.MESSAGE_FULL_WINDOW -> "Show a full-window bridge message"
         BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up bridge message"
         BridgeCommandType.PICTURE_MESSAGE -> "Show a private Continuity picture message"
-        BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install an APK from HTTPS${if (request.saveToProject) ", saving the exact APK to APKbox" else ""}"
+        BridgeCommandType.APK_INSTALL_URL -> "Resolve/download and unattended-install an exact APK${if (request.saveToProject) ", saving it to APKbox" else ""}"
+        BridgeCommandType.JOB_LIST -> "List durable jobs"
+        BridgeCommandType.JOB_STATUS -> "Read durable job '${request.jobId}'"
+        BridgeCommandType.JOB_CANCEL -> "Cancel durable job '${request.jobId}' at a safe boundary"
+        BridgeCommandType.JOB_RESUME -> "Resume durable job '${request.jobId}'"
+        BridgeCommandType.PROJECT_LIST -> "List APKbox projects"
+        BridgeCommandType.PROJECT_GET -> "Read APKbox project '${request.projectId}'"
+        BridgeCommandType.APK_LIST -> "List stored APKs"
+        BridgeCommandType.APK_SEARCH -> "Search APKbox for '${request.query}'"
+        BridgeCommandType.APK_INSPECT -> "Inspect exact APKbox record '${request.apkRecordId}'"
+        BridgeCommandType.APK_PULL -> "Pull exact APKbox record '${request.apkRecordId}' to private Continuity chunks"
+        BridgeCommandType.PACKAGE_STATE -> "Inspect package state for ${request.packageName}"
+        BridgeCommandType.INSTALLED_APPS -> "List installed Android apps"
+        BridgeCommandType.DEVICE_STATE -> "Read structured device state"
         BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture the current screen"
         BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) in ${request.packageName}"

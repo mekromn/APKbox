@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import com.mekromn.apkbox.artifacts.ArtifactCancelledException
 import com.mekromn.apkbox.artifacts.ArtifactIngestor
+import com.mekromn.apkbox.artifacts.ArtifactSourceResolver
 import com.mekromn.apkbox.bridge.PrivilegedBridgeManager
 import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
@@ -24,6 +25,7 @@ class BuildRunner(
     private val privileged: PrivilegedBridgeManager,
     private val jobs: DurableJobEngine,
     artifacts: ArtifactIngestor,
+    private val resolver: ArtifactSourceResolver,
 ) {
     private val appContext = context.applicationContext
     private val store = BuildRunStore(appContext)
@@ -102,21 +104,36 @@ class BuildRunner(
         )
         store.saveCheckpoint(checkpoint)
 
-        if (candidate.requiresBuildToken && !credentials.hasToken()) {
+        val fastestLocal = runCatching {
+            resolver.resolveExact(candidate.expectedApkSha256, candidate.targetPackage)
+        }.getOrNull()
+        if (fastestLocal == null && candidate.requiresBuildToken && !credentials.hasToken()) {
             return@withLock fail(
                 checkpoint,
                 BuildRunState.BLOCKED_AUTH_REQUIRED,
-                "Private build source requires the encrypted read-only build-source token.",
+                "Private build source requires the encrypted read-only build-source token because no exact local source is available.",
                 resumable = false,
             )
         }
 
-        val token = if (candidate.requiresBuildToken) credentials.readToken() else null
+        val token = if (fastestLocal == null && candidate.requiresBuildToken) credentials.readToken() else null
         checkpoint = transition(checkpoint, BuildRunState.DOWNLOADING, "Downloading build artifact through the shared resumable artifact engine.")
         var lastPersistAt = 0L
         var lastPersistBytes = -1L
         val apkFile = try {
-            downloader.obtainApk(
+            if (fastestLocal != null) {
+                jobs.stage(
+                    candidate.runId,
+                    "LOCAL_EXACT_SOURCE",
+                    "Reusing exact ${fastestLocal.sourceKind.name.lowercase().replace('_', ' ')} source; network download skipped.",
+                    cancellable = true,
+                    resumable = true,
+                    artifactSha256 = fastestLocal.sha256,
+                    artifactPath = fastestLocal.file.absolutePath,
+                )
+                fastestLocal.file
+            } else {
+                downloader.obtainApk(
                 candidate = candidate,
                 buildToken = token,
                 onProgress = { downloaded, total ->
@@ -133,8 +150,9 @@ class BuildRunner(
                         lastPersistBytes = downloaded
                     }
                 },
-                isCancelled = { jobs.isCancelRequested(candidate.runId) },
-            )
+                    isCancelled = { jobs.isCancelRequested(candidate.runId) },
+                )
+            }
         } catch (cancelled: ArtifactCancelledException) {
             return@withLock cancelled(checkpoint, "Build download cancelled; resumable partial artifact preserved.")
         } catch (failure: Throwable) {
