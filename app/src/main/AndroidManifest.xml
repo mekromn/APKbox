@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Optional, user-granted bridge presentation mode for true always-on-top ChatGPT messages. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Optional direct-storage access powers APKbox's own APK-focused file browser and Auto Scanner. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
@@ -193,6 +196,13 @@
         <activity
             android:name=".bridge.BridgeMessageActivity"
             android:exported="true"
+            android:excludeFromRecents="true"
+            android:screenOrientation="unspecified" />
+
+        <!-- Local UI only; configures notification, popup-activity, and overlay message modes. -->
+        <activity
+            android:name=".bridge.BridgeMessageDisplaySettingsActivity"
+            android:exported="false"
             android:excludeFromRecents="true"
             android:screenOrientation="unspecified" />
 
