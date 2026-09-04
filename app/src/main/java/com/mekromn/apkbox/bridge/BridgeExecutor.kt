@@ -37,6 +37,13 @@ class BridgeExecutor(
     private val prefs by lazy { ApkBoxServices.bridgePreferences(appContext) }
     private val relay by lazy { ApkBoxServices.relayClient() }
     private val advanced by lazy { AdvancedBridgeCoordinator(appContext, relay) }
+    private val remoteApkInstaller by lazy {
+        RemoteApkInstallCoordinator(
+            context = appContext,
+            library = ApkBoxServices.libraryStore(appContext),
+            privileged = privileged,
+        )
+    }
 
     init {
         createChannels()
@@ -95,6 +102,8 @@ class BridgeExecutor(
                     val detail = deliverPictureMessage(request)
                     success(request, risk, detail, started)
                 }
+
+                BridgeCommandType.APK_INSTALL_URL -> remoteApkInstaller.execute(request, risk)
 
                 BridgeCommandType.LOGCAT -> executeShell(
                     request,
