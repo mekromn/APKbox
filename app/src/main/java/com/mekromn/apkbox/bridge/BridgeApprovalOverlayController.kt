@@ -152,6 +152,29 @@ object BridgeApprovalOverlayController {
             pending.request.imagePath.takeIf { it.isNotBlank() }?.let {
                 append("\n\nImage\n").append(it.take(500))
             }
+            if (pending.request.type == BridgeCommandType.APK_INSTALL_URL) {
+                append("\n\nAPK source\n").append(pending.request.downloadUrl.take(2_000))
+                pending.request.packageName.takeIf { it.isNotBlank() }?.let {
+                    append("\n\nExpected package\n").append(it)
+                }
+                append("\n\nExpected SHA-256\n")
+                append(pending.request.expectedApkSha256.ifBlank { "Not supplied; APKbox will compute and report it" })
+                append("\n\nSave to project\n").append(if (pending.request.saveToProject) "Yes" else "No")
+                if (pending.request.saveToProject) {
+                    append("\n\nProject\n").append(
+                        pending.request.projectId.ifBlank { "Auto-resolve by package; create if none exists" }
+                    )
+                    pending.request.projectName.takeIf { it.isNotBlank() }?.let { append("\nProject name\n").append(it) }
+                    pending.request.displayName.takeIf { it.isNotBlank() }?.let { append("\nAPK display name\n").append(it) }
+                    pending.request.archiveTitle.takeIf { it.isNotBlank() }?.let { append("\nAPK title\n").append(it) }
+                    pending.request.archiveDescription.takeIf { it.isNotBlank() }?.let {
+                        append("\nAPK description\n").append(it.take(2_000))
+                    }
+                }
+                append("\n\nDowngrade\n").append(if (pending.request.allowDowngrade) "Allowed" else "Not allowed")
+                append("\n\nLaunch after install\n").append(if (pending.request.autoLaunch) "Yes" else "No")
+                append("\n\nAuthenticated source\n").append(if (pending.request.requiresBuildToken) "Yes" else "No")
+            }
             append("\n\nExpires\n")
             append(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM)
                 .format(Date(pending.request.expiresAtEpochMs)))
@@ -228,9 +251,12 @@ object BridgeApprovalOverlayController {
         )
         primaryRow.addView(
             actionButton(
-                if (pending.request.type == BridgeCommandType.AGENT_START) "Start plan"
-                else if (pending.request.type == BridgeCommandType.BUILD_START) "Start build"
-                else "Allow once",
+                when (pending.request.type) {
+                    BridgeCommandType.AGENT_START -> "Start plan"
+                    BridgeCommandType.BUILD_START -> "Start build"
+                    BridgeCommandType.APK_INSTALL_URL -> "Install APK"
+                    else -> "Allow once"
+                },
                 RemoteBridgeService.ACTION_APPROVE_ONCE,
             ),
             LinearLayout.LayoutParams(0, dp(52), 1f),
@@ -291,6 +317,8 @@ object BridgeApprovalOverlayController {
             "Autonomous plan starts/resumes always require a fresh approval and never inherit an earlier trusted session."
         pending.request.type == BridgeCommandType.BUILD_START ->
             "Build Runner can change installed app state, so BUILD_START always requires a fresh approval."
+        pending.request.type == BridgeCommandType.APK_INSTALL_URL ->
+            "Direct URL installation always requires a fresh approval. APKbox downloads and hashes the full APK before unattended install, verifies installed bytes afterward, and never silently removes a signature-conflicting app."
         pending.risk == BridgeRisk.READ_ONLY ->
             "Read-only debugging can be covered by a temporary trusted session."
         pending.risk == BridgeRisk.DEBUG_ACTION ->
@@ -314,6 +342,7 @@ object BridgeApprovalOverlayController {
         BridgeCommandType.MESSAGE_FULL_WINDOW -> "Show a full-window bridge message"
         BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up bridge message"
         BridgeCommandType.PICTURE_MESSAGE -> "Show a private Continuity picture message"
+        BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install an APK from HTTPS${if (request.saveToProject) ", saving the exact APK to APKbox" else ""}"
         BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture the current screen"
         BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) in ${request.packageName}"
