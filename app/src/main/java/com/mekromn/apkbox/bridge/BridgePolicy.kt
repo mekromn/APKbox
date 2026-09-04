@@ -70,9 +70,10 @@ object BridgePolicy {
         BridgeCommandType.AGENT_START,
         BridgeCommandType.AGENT_RESUME -> BridgeRisk.DEBUG_ACTION
 
-        // A build candidate may install/downgrade/launch an APK. Classify from the maximum possible
-        // effect rather than trusting remote candidate flags to lower the approval requirement.
-        BridgeCommandType.BUILD_START -> BridgeRisk.MUTATING
+        // Both candidate-driven builds and direct URL installs can change installed package state.
+        // Classify from the maximum possible effect rather than trusting remote flags to lower risk.
+        BridgeCommandType.BUILD_START,
+        BridgeCommandType.APK_INSTALL_URL -> BridgeRisk.MUTATING
 
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
