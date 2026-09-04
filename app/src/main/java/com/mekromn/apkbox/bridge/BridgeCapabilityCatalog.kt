@@ -11,9 +11,9 @@ import org.json.JSONObject
  * verb merely because APKbox has a local UI for the same capability.
  */
 object BridgeCapabilityCatalog {
-    const val PROTOCOL_VERSION = 4
-    const val CAPABILITY_SCHEMA = 3
-    const val SKILL_REVISION = "2026-09-04.1"
+    const val PROTOCOL_VERSION = 5
+    const val CAPABILITY_SCHEMA = 4
+    const val SKILL_REVISION = "2026-09-04.2"
     const val SKILL_REPOSITORY = "mekromn/Continuity"
     const val SKILL_PATH = "skills/apkbox-remote-bridge/SKILL.md"
     const val PROTOCOL_PATH = "bridge/README.md"
@@ -74,6 +74,29 @@ object BridgeCapabilityCatalog {
                 .put("intrusiveChoicesRequireAllowPopups", true)
                 .put("overlayPermissionRequiredForFloatingChoices", true)
                 .put("pictureMaxBytes", 8 * 1024 * 1024))
+            .put("remoteApkInstall", JSONObject()
+                .put("command", "APK_INSTALL_URL")
+                .put("requestSchema", 5)
+                .put("required", JSONArray(listOf("id", "type", "downloadUrl", "reason")))
+                .put("optional", JSONArray(listOf(
+                    "expectedApkSha256", "packageName", "saveToProject", "projectId", "projectName",
+                    "displayName", "archiveTitle", "archiveDescription", "requiresBuildToken",
+                    "allowDowngrade", "autoLaunch"
+                )))
+                .put("httpsOnly", true)
+                .put("expectedShaRecommendedWhenKnown", true)
+                .put("downloadsCompleteBeforeInstall", true)
+                .put("computesAndReportsSha256", true)
+                .put("verifiesInstalledBaseApkSha256", true)
+                .put("temporaryApkDeletedAfterTransaction", true)
+                .put("saveToProjectOptional", true)
+                .put("projectResolution", "Explicit projectId wins. Otherwise match package: create a project for zero matches, use the single match, refuse ambiguity for multiple matches.")
+                .put("archiveMetadata", JSONArray(listOf("displayName", "archiveTitle", "archiveDescription")))
+                .put("exactDuplicateReused", true)
+                .put("metadataMayUpdateExistingExactRecord", true)
+                .put("freshApprovalAlways", true)
+                .put("signatureConflictAutoUninstall", false)
+                .put("authenticatedSource", "Optional encrypted APKbox build-source token; credentials are sent only to GitHub credential hosts and never forwarded to CDN redirects."))
             .put("uiSelectors", JSONObject()
                 .put("formats", JSONArray(listOf(
                     "id:<resource-id>",
@@ -112,6 +135,8 @@ object BridgeCapabilityCatalog {
                 "agent_selected_rich_message_presentations",
                 "always_on_top_security_approval_overlay",
                 "private_picture_messages",
+                "remote_apk_url_download_verify_unattended_install",
+                "optional_remote_apk_project_archive_with_title_description",
                 "autonomous_plan_runner",
                 "oracle_watchdog_and_evidence",
                 "build_download_verify_archive_install_launch",
@@ -130,7 +155,11 @@ object BridgeCapabilityCatalog {
                 .put("uiCoordinateMax", 20000)
                 .put("uiTextCharsMax", 2000)
                 .put("requestIdCharsMax", 96)
-                .put("pictureMessageBytesMax", 8 * 1024 * 1024))
+                .put("pictureMessageBytesMax", 8 * 1024 * 1024)
+                .put("remoteApkBytesMax", 2L * 1024L * 1024L * 1024L)
+                .put("remoteApkRedirectsMax", 8)
+                .put("archiveTitleCharsMax", 256)
+                .put("archiveDescriptionCharsMax", 8192))
             .put("securityContract", JSONObject()
                 .put("deviceComputesRisk", true)
                 .put("relayCannotLowerRisk", true)
@@ -138,6 +167,8 @@ object BridgeCapabilityCatalog {
                 .put("popupOnlyApprovalFallsBackToNotificationIfOverlayUnavailable", true)
                 .put("mutatingAlwaysNeedsFreshApproval", true)
                 .put("dangerousAlwaysNeedsFreshApproval", true)
+                .put("remoteApkInstallAlwaysNeedsFreshApproval", true)
+                .put("remoteApkInstallNeverAutoUninstallsSignatureConflict", true)
                 .put("advancedStartResumeNeedsFreshApproval", true)
                 .put("trustedSessionNeverGrantsBlanketShell", true)
                 .put("durableInFlightReservationBeforeExecution", true)
@@ -147,9 +178,11 @@ object BridgeCapabilityCatalog {
                 .put("atMostOnceJournal", true))
             .put("knownLimitations", JSONArray(listOf(
                 "Relay SCREENSHOT is currently a scaled JPEG preview, not an exact forensic capture.",
+                "APK_INSTALL_URL has no dedicated status/cancel/resume verb yet; interruption is closed without blind replay and requires state inspection before a new request ID.",
+                "APK_INSTALL_URL currently installs a single monolithic APK, not split APK/APKS/XAPK packages.",
+                "Direct URL install refuses an installed signature conflict; the local signature-conflict uninstall/reinstall workflow is not yet a remote bridge command.",
                 "Always-on-top security/message overlays require the user's Android Draw over other apps grant; notification fallback is used when unavailable.",
-                "Wireless ADB still requires Android Wi-Fi/trusted-network policy when Shizuku/Sui is unavailable.",
-                "Local signature-conflict reinstall is not exposed as a remote bridge command."
+                "Wireless ADB still requires Android Wi-Fi/trusted-network policy when Shizuku/Sui is unavailable."
             )))
     }
 }
