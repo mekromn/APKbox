@@ -76,6 +76,8 @@ data class BridgeRequest(
     val projectId: String = "",
     val projectName: String = "",
     val displayName: String = "",
+    val archiveTitle: String = "",
+    val archiveDescription: String = "",
     val requiresBuildToken: Boolean = false,
     val allowDowngrade: Boolean = false,
     val autoLaunch: Boolean = false,
@@ -114,6 +116,8 @@ data class BridgeRequest(
         .put("projectId", projectId)
         .put("projectName", projectName)
         .put("displayName", displayName)
+        .put("archiveTitle", archiveTitle)
+        .put("archiveDescription", archiveDescription)
         .put("requiresBuildToken", requiresBuildToken)
         .put("allowDowngrade", allowDowngrade)
         .put("autoLaunch", autoLaunch)
@@ -188,6 +192,8 @@ data class BridgeRequest(
                 projectId = projectId,
                 projectName = json.optString("projectName").trim().take(256),
                 displayName = json.optString("displayName").trim().take(256),
+                archiveTitle = json.optString("archiveTitle").trim().take(256),
+                archiveDescription = json.optString("archiveDescription").trim().take(8_192),
                 requiresBuildToken = json.optBoolean("requiresBuildToken", false),
                 allowDowngrade = json.optBoolean("allowDowngrade", false),
                 autoLaunch = json.optBoolean("autoLaunch", false),
