@@ -284,6 +284,8 @@ class RemoteBridgeService : Service() {
                     "Use AGENT_STATUS with runId '${inFlight.request.runId}' to inspect APKbox's persisted autonomous checkpoint; do not blindly repeat the start/resume request."
                 BridgeCommandType.BUILD_START ->
                     "Use BUILD_STATUS with runId/buildId from this request to inspect APKbox's persisted build checkpoint; do not blindly repeat BUILD_START."
+                BridgeCommandType.APK_INSTALL_URL ->
+                    "A direct APK install may have downloaded, archived, or installed before interruption. Inspect the installed package/project state and never blindly replay this request ID. A new request should use a new ID after state is confirmed."
                 else ->
                     "The operation's final effect is ambiguous, so APKbox will not replay the same request automatically. Inspect device state before issuing a new request ID."
             }
@@ -543,6 +545,27 @@ class RemoteBridgeService : Service() {
                         pending.request.imagePath.takeIf { it.isNotBlank() }?.let {
                             append("\n\nImage: ").append(it.take(500))
                         }
+                        if (pending.request.type == BridgeCommandType.APK_INSTALL_URL) {
+                            append("\n\nAPK: ").append(pending.request.downloadUrl.take(1_000))
+                            pending.request.packageName.takeIf { it.isNotBlank() }?.let {
+                                append("\nPackage: ").append(it)
+                            }
+                            pending.request.expectedApkSha256.takeIf { it.isNotBlank() }?.let {
+                                append("\nSHA-256: ").append(it)
+                            }
+                            append("\nSave to project: ").append(pending.request.saveToProject)
+                            if (pending.request.saveToProject) {
+                                append("\nProject: ").append(pending.request.projectId.ifBlank { "auto" })
+                                pending.request.archiveTitle.takeIf { it.isNotBlank() }?.let {
+                                    append("\nTitle: ").append(it)
+                                }
+                                pending.request.archiveDescription.takeIf { it.isNotBlank() }?.let {
+                                    append("\nDescription: ").append(it.take(500))
+                                }
+                            }
+                            append("\nAllow downgrade: ").append(pending.request.allowDowngrade)
+                            append("\nAuto-launch: ").append(pending.request.autoLaunch)
+                        }
                     }
                 )
             )
@@ -552,7 +575,7 @@ class RemoteBridgeService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .addAction(0, "Deny", deny)
-            .addAction(0, "Allow once", allowOnce)
+            .addAction(0, if (pending.request.type == BridgeCommandType.APK_INSTALL_URL) "Install APK" else "Allow once", allowOnce)
             .addAction(android.R.drawable.ic_menu_preferences, "Display", displayOptions)
 
         if (BridgePolicy.trustedSessionEligible(pending.request)) {
@@ -665,6 +688,7 @@ class RemoteBridgeService : Service() {
         BridgeCommandType.MESSAGE_FULL_WINDOW -> "Full-window message: ${request.message.take(180)}"
         BridgeCommandType.MESSAGE_HEADS_UP -> "Heads-up message: ${request.message.take(180)}"
         BridgeCommandType.PICTURE_MESSAGE -> "Picture message: ${request.title.ifBlank { request.imagePath }.take(180)}"
+        BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install APK from ${request.downloadUrl.take(150)}${if (request.saveToProject) " and save it to APKbox" else ""}"
         BridgeCommandType.UI_SNAPSHOT -> "Read current UI hierarchy"
         BridgeCommandType.SCREENSHOT -> "Capture current screen"
         BridgeCommandType.UI_TAP -> "Tap ${request.x},${request.y} in ${request.packageName}"
