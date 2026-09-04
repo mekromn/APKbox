@@ -2,196 +2,379 @@ package com.mekromn.apkbox.bridge
 
 import android.content.Context
 import android.net.Uri
-import com.mekromn.apkbox.agent.BuildSourceCredentials
+import com.mekromn.apkbox.artifacts.ArtifactCancelledException
+import com.mekromn.apkbox.artifacts.ArtifactIngestor
+import com.mekromn.apkbox.artifacts.ArtifactSpec
+import com.mekromn.apkbox.artifacts.IngestedArtifact
 import com.mekromn.apkbox.data.ApkInspector
 import com.mekromn.apkbox.data.LibraryStore
+import com.mekromn.apkbox.jobs.DurableJobEngine
+import com.mekromn.apkbox.jobs.DurableJobState
+import com.mekromn.apkbox.jobs.DurableJobType
 import com.mekromn.apkbox.model.ApkProject
 import com.mekromn.apkbox.model.ApkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.MessageDigest
 
 /**
- * One-request remote APK installer for agents that already have a direct APK URL.
- *
- * This intentionally does not weaken BuildRunner's stricter manifest + exact SHA contract. Direct
- * installs are still downloaded completely, hashed, parsed, optionally archived, unattended-
- * installed through APKbox's privileged transport selector, and verified against installed
- * base.apk before success is reported.
+ * One-request remote APK deployment backed by APKbox's universal durable job + artifact layers.
+ * BuildRunner remains the stricter reproducible candidate-manifest workflow; this path optimizes
+ * "I already have an APK URL" while still preserving exact-byte verification and safe recovery.
  */
 class RemoteApkInstallCoordinator(
     context: Context,
     private val library: LibraryStore,
     private val privileged: PrivilegedBridgeManager,
+    private val jobs: DurableJobEngine,
+    private val artifacts: ArtifactIngestor,
 ) {
     companion object {
-        private const val BUFFER_BYTES = 1024 * 1024
-        private const val MAX_REDIRECTS = 8
-        private const val CONNECT_TIMEOUT_MS = 15_000
-        private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_APK_BYTES = 2L * 1024L * 1024L * 1024L
         private val PACKAGE_REGEX = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
         private val SHA_REGEX = Regex("[0-9a-fA-F]{64}")
     }
 
     private val appContext = context.applicationContext
-    private val credentials = BuildSourceCredentials(appContext)
 
     suspend fun execute(request: BridgeRequest, risk: BridgeRisk): BridgeResult {
-        val started = System.currentTimeMillis()
-        val url = request.downloadUrl.trim()
-        if (!url.startsWith("https://", ignoreCase = true)) {
-            return failed(request, risk, started, "Remote APK URL must use HTTPS.")
-        }
-        val expectedSha = request.expectedApkSha256.trim().lowercase()
-        if (expectedSha.isNotBlank() && !SHA_REGEX.matches(expectedSha)) {
-            return failed(request, risk, started, "expectedApkSha256 must be blank or exactly 64 hexadecimal characters.")
-        }
-        val expectedPackage = request.packageName.trim()
-        if (expectedPackage.isNotBlank() && !PACKAGE_REGEX.matches(expectedPackage)) {
-            return failed(request, risk, started, "Invalid expected package name.")
-        }
-        if (request.requiresBuildToken && !credentials.hasToken()) {
-            return failed(request, risk, started, "This APK URL requires the separately encrypted read-only build-source token, but APKbox does not have one configured.")
-        }
-
-        val scratchDir = File(appContext.cacheDir, "remote-apk-install").apply { mkdirs() }
-        val apkFile = File(scratchDir, "${request.id}.apk")
-        apkFile.delete()
-
-        return try {
-            val token = if (request.requiresBuildToken) credentials.readToken() else null
-            val downloadedBytes = download(url, request.requiresBuildToken, token, apkFile)
-            val actualSha = sha256(apkFile)
-            if (expectedSha.isNotBlank() && !actualSha.equals(expectedSha, ignoreCase = true)) {
-                return failed(
-                    request,
-                    risk,
-                    started,
-                    "Downloaded APK SHA-256 mismatch. Expected $expectedSha, got $actualSha. Nothing was installed.",
-                )
-            }
-
-            val archive = runCatching { ApkInspector.inspect(appContext, apkFile) }.getOrElse { failure ->
-                return failed(request, risk, started, "Downloaded file is not a parseable APK: ${message(failure)}")
-            }
-            if (expectedPackage.isNotBlank() && archive.packageName != expectedPackage) {
-                return failed(
-                    request,
-                    risk,
-                    started,
-                    "Downloaded APK package is ${archive.packageName}, expected $expectedPackage. Nothing was installed.",
-                )
-            }
-
-            val record = if (request.saveToProject) {
-                runCatching {
-                    archiveToProject(
-                        request = request,
-                        apkFile = apkFile,
-                        sha256 = actualSha,
-                        packageName = archive.packageName,
-                        archiveLabel = archive.label,
-                    )
-                }.getOrElse { failure ->
-                    return failed(request, risk, started, "APKbox project archive failed: ${message(failure)}")
-                }
-            } else null
-
-            val installed = ApkInspector.inspectInstalled(appContext, archive.packageName)
-            if (installed != null &&
-                !installed.signingCertSha256.isNullOrBlank() &&
-                !archive.signingCertSha256.isNullOrBlank() &&
-                !installed.signingCertSha256.equals(archive.signingCertSha256, ignoreCase = true)
-            ) {
-                val archiveNote = if (record != null) " The APK was preserved in project '${record.projectId}'." else ""
-                return failed(
-                    request,
-                    risk,
-                    started,
-                    "Installed ${archive.packageName} has a different signing certificate. APKbox will not silently remove app data during a direct remote install.$archiveNote Use the explicit uninstall/reinstall flow when signature replacement is intended.",
-                )
-            }
-
-            val existingSha = installedPackageSha256(archive.packageName)
-            if (!existingSha.equals(actualSha, ignoreCase = true)) {
-                val install = runCatching {
-                    privileged.installApk(apkFile, allowDowngrade = request.allowDowngrade)
-                }.getOrElse { failure ->
-                    return failed(request, risk, started, "Unattended install transport failed: ${message(failure)}")
-                }
-                if (!install.success) {
-                    return failed(
-                        request,
-                        risk,
-                        started,
-                        "Android package manager rejected the APK: ${install.output.take(2_000)}",
-                    )
-                }
-            }
-
-            val installedSha = installedPackageSha256(archive.packageName)
-            if (!installedSha.equals(actualSha, ignoreCase = true)) {
-                return failed(
-                    request,
-                    risk,
-                    started,
-                    "Package manager completed, but installed base.apk SHA '$installedSha' does not match downloaded APK $actualSha.",
-                )
-            }
-
-            var launchDetail = ""
-            if (request.autoLaunch) {
-                val launch = runCatching {
-                    privileged.execute("monkey -p ${archive.packageName} -c android.intent.category.LAUNCHER 1", 15)
-                }.getOrElse { failure ->
-                    return failed(request, risk, started, "APK installed and verified, but launch failed: ${message(failure)}")
-                }
-                if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
-                    return failed(request, risk, started, "APK installed and verified, but launch failed: ${launch.output.take(2_000)}")
-                }
-                launchDetail = " and launched"
-            }
-
-            val output = JSONObject()
-                .put("packageName", archive.packageName)
-                .put("label", archive.label)
-                .put("apkSha256", actualSha)
-                .put("downloadedBytes", downloadedBytes)
-                .put("installedBaseApkSha256", installedSha)
-                .put("savedToProject", record != null)
-                .put("projectId", record?.projectId.orEmpty())
-                .put("apkRecordId", record?.id.orEmpty())
-                .put("archiveTitle", record?.title.orEmpty())
-                .put("archiveDescription", record?.description.orEmpty())
-                .put("transport", privileged.activeTransportLabel())
-                .put("launched", request.autoLaunch)
-                .toString(2)
-
-            BridgeResult(
+        val jobId = request.jobId.ifBlank { request.id }
+        val existing = jobs.begin(
+            jobId = jobId,
+            type = DurableJobType.REMOTE_APK_INSTALL,
+            requestId = request.id,
+            packageName = request.packageName,
+            projectId = request.projectId,
+            payloadJson = request.toJson().toString(),
+            resumable = true,
+        )
+        if (existing.state == DurableJobState.SUCCEEDED && existing.resultJson.isNotBlank()) {
+            return BridgeResult(
                 requestId = request.id,
                 status = BridgeResultStatus.SUCCESS,
                 risk = risk,
-                detail = buildString {
-                    append("Downloaded, SHA-256 verified, unattended-installed, and post-install verified ")
-                    append(archive.packageName)
-                    if (record != null) append("; exact APK bytes saved to APKbox project ${record.projectId}")
-                    append(launchDetail)
-                    append('.')
-                },
-                output = output,
+                detail = "Remote APK job '$jobId' had already completed successfully.",
+                output = existing.resultJson,
+            )
+        }
+        if (existing.state == DurableJobState.RUNNING && existing.requestId != request.id) {
+            return BridgeResult(
+                requestId = request.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Job '$jobId' is already running under request ${existing.requestId}.",
+            )
+        }
+        jobs.start(jobId, "Remote APK deployment started.")
+        return runTransaction(request, request.id, risk, jobId)
+    }
+
+    suspend fun resume(jobId: String, controllerRequest: BridgeRequest, risk: BridgeRisk): BridgeResult {
+        val job = jobs.get(jobId) ?: return BridgeResult(
+            requestId = controllerRequest.id,
+            status = BridgeResultStatus.INVALID,
+            risk = risk,
+            detail = "Job '$jobId' was not found.",
+        )
+        if (job.type != DurableJobType.REMOTE_APK_INSTALL) {
+            return BridgeResult(
+                requestId = controllerRequest.id,
+                status = BridgeResultStatus.INVALID,
+                risk = risk,
+                detail = "Job '$jobId' is ${job.type}, not a remote APK install.",
+            )
+        }
+        if (job.state == DurableJobState.SUCCEEDED) {
+            return BridgeResult(
+                requestId = controllerRequest.id,
+                status = BridgeResultStatus.SUCCESS,
+                risk = risk,
+                detail = "Job '$jobId' is already complete.",
+                output = job.resultJson,
+            )
+        }
+        val original = runCatching { BridgeRequest.fromJson(JSONObject(job.payloadJson)) }.getOrElse { failure ->
+            return BridgeResult(
+                requestId = controllerRequest.id,
+                status = BridgeResultStatus.FAILED,
+                risk = risk,
+                detail = "Job '$jobId' cannot resume because its original request payload is unavailable: ${message(failure)}",
+            )
+        }
+        jobs.prepareResume(jobId)
+        return runTransaction(original.copy(jobId = jobId), controllerRequest.id, risk, jobId)
+    }
+
+    private suspend fun runTransaction(
+        request: BridgeRequest,
+        responseRequestId: String,
+        risk: BridgeRisk,
+        jobId: String,
+    ): BridgeResult {
+        val started = System.currentTimeMillis()
+        val url = request.downloadUrl.trim()
+        if (!url.startsWith("https://", ignoreCase = true)) {
+            return fail(responseRequestId, risk, started, jobId, "Remote APK URL must use HTTPS.", resumable = false)
+        }
+        val expectedSha = request.expectedApkSha256.trim().lowercase()
+        if (expectedSha.isNotBlank() && !SHA_REGEX.matches(expectedSha)) {
+            return fail(responseRequestId, risk, started, jobId, "expectedApkSha256 must be blank or exactly 64 hexadecimal characters.", resumable = false)
+        }
+        val expectedPackage = request.packageName.trim()
+        if (expectedPackage.isNotBlank() && !PACKAGE_REGEX.matches(expectedPackage)) {
+            return fail(responseRequestId, risk, started, jobId, "Invalid expected package name.", resumable = false)
+        }
+        if (request.requiresBuildToken && !artifacts.hasBuildToken()) {
+            return fail(
+                responseRequestId,
+                risk,
+                started,
+                jobId,
+                "This APK URL requires the encrypted APKbox build-source token, but none is configured.",
+                resumable = true,
+            )
+        }
+
+        val artifact = try {
+            jobs.stage(
+                jobId,
+                stage = "DOWNLOADING",
+                detail = "Ingesting APK into APKbox's resumable content-addressed artifact store.",
+                cancellable = true,
+                resumable = true,
+            )
+            val prior = jobs.get(jobId)
+            prior?.artifactSha256
+                ?.takeIf { it.isNotBlank() }
+                ?.let(artifacts::objectForSha)
+                ?.let { file ->
+                    IngestedArtifact(
+                        sha256 = prior.artifactSha256,
+                        sizeBytes = file.length(),
+                        file = file,
+                        sourceUrl = url,
+                        resumedBytes = file.length(),
+                        cacheHit = true,
+                    )
+                }
+                ?: artifacts.ingest(
+                    ArtifactSpec(
+                        jobId = jobId,
+                        sourceUrl = url,
+                        expectedSha256 = expectedSha,
+                        requiresBuildToken = request.requiresBuildToken,
+                        maxBytes = MAX_APK_BYTES,
+                        userAgent = "APKbox-Remote-APK-Install",
+                        accept = "application/vnd.android.package-archive, application/octet-stream",
+                    ),
+                    onProgress = { downloaded, total ->
+                        jobs.progress(jobId, downloaded, total, "Downloading APK · $downloaded${if (total >= 0L) " / $total" else ""} bytes")
+                    },
+                    isCancelled = { jobs.isCancelRequested(jobId) },
+                )
+        } catch (cancelled: ArtifactCancelledException) {
+            jobs.cancelled(jobId, "Remote APK download cancelled; partial bytes were preserved for an explicit future resume.")
+            return BridgeResult(
+                requestId = responseRequestId,
+                status = BridgeResultStatus.DENIED,
+                risk = risk,
+                detail = "Job '$jobId' cancelled at a safe download boundary.",
                 durationMs = System.currentTimeMillis() - started,
             )
-        } finally {
-            apkFile.delete()
+        } catch (failure: Throwable) {
+            return fail(
+                responseRequestId,
+                risk,
+                started,
+                jobId,
+                "Artifact ingest failed: ${message(failure)}",
+                resumable = true,
+            )
         }
+
+        jobs.stage(
+            jobId,
+            stage = "VERIFYING_APK",
+            detail = "Exact artifact ${artifact.sha256} acquired; parsing APK identity.",
+            cancellable = true,
+            resumable = true,
+            artifactSha256 = artifact.sha256,
+            artifactPath = artifact.file.absolutePath,
+        )
+        if (jobs.isCancelRequested(jobId)) {
+            jobs.cancelled(jobId)
+            return cancelledResult(responseRequestId, risk, started, jobId)
+        }
+
+        val archive = runCatching { ApkInspector.inspect(appContext, artifact.file) }.getOrElse { failure ->
+            return fail(responseRequestId, risk, started, jobId, "Downloaded artifact is not a parseable APK: ${message(failure)}", resumable = false)
+        }
+        if (expectedPackage.isNotBlank() && archive.packageName != expectedPackage) {
+            return fail(
+                responseRequestId,
+                risk,
+                started,
+                jobId,
+                "Downloaded APK package is ${archive.packageName}, expected $expectedPackage. Nothing was installed.",
+                resumable = false,
+            )
+        }
+
+        jobs.stage(
+            jobId,
+            stage = "PREPARING",
+            detail = "Verified ${archive.packageName}; preparing project/archive/install plan.",
+            cancellable = true,
+            resumable = true,
+            packageName = archive.packageName,
+        )
+
+        val record = if (request.saveToProject) {
+            if (jobs.isCancelRequested(jobId)) {
+                jobs.cancelled(jobId)
+                return cancelledResult(responseRequestId, risk, started, jobId)
+            }
+            jobs.stage(jobId, "ARCHIVING", "Saving exact verified APK bytes into APKbox.", cancellable = true, resumable = true)
+            runCatching {
+                archiveToProject(
+                    request = request,
+                    apkFile = artifact.file,
+                    sha256 = artifact.sha256,
+                    packageName = archive.packageName,
+                    archiveLabel = archive.label,
+                )
+            }.getOrElse { failure ->
+                return fail(responseRequestId, risk, started, jobId, "APKbox project archive failed: ${message(failure)}", resumable = true)
+            }.also { saved ->
+                jobs.stage(
+                    jobId,
+                    "ARCHIVED",
+                    "Exact APK saved as record ${saved.id} in project ${saved.projectId}.",
+                    cancellable = true,
+                    resumable = true,
+                    projectId = saved.projectId,
+                )
+            }
+        } else null
+
+        val installed = ApkInspector.inspectInstalled(appContext, archive.packageName)
+        if (installed != null &&
+            !installed.signingCertSha256.isNullOrBlank() &&
+            !archive.signingCertSha256.isNullOrBlank() &&
+            !installed.signingCertSha256.equals(archive.signingCertSha256, ignoreCase = true)
+        ) {
+            val archiveNote = if (record != null) " The APK remains preserved in project '${record.projectId}'." else ""
+            return fail(
+                responseRequestId,
+                risk,
+                started,
+                jobId,
+                "Installed ${archive.packageName} has a different signing certificate. APKbox will not silently remove app data.$archiveNote Use the explicit signature-replacement flow when intended.",
+                resumable = false,
+            )
+        }
+
+        if (jobs.isCancelRequested(jobId)) {
+            jobs.cancelled(jobId)
+            return cancelledResult(responseRequestId, risk, started, jobId)
+        }
+
+        val existingSha = installedPackageSha256(archive.packageName)
+        if (!existingSha.equals(artifact.sha256, ignoreCase = true)) {
+            jobs.stage(
+                jobId,
+                stage = "INSTALLING",
+                detail = "Streaming exact APK through ${privileged.activeTransportLabel()}; cancellation is locked until package-manager state is verified.",
+                cancellable = false,
+                resumable = true,
+            )
+            val install = runCatching {
+                privileged.installApk(artifact.file, allowDowngrade = request.allowDowngrade) { sent, total ->
+                    jobs.progress(jobId, sent, total, "Installing via ${privileged.activeTransportLabel()} · $sent / $total bytes")
+                }
+            }.getOrElse { failure ->
+                return fail(responseRequestId, risk, started, jobId, "Unattended install transport failed: ${message(failure)}", resumable = true)
+            }
+            if (!install.success) {
+                return fail(
+                    responseRequestId,
+                    risk,
+                    started,
+                    jobId,
+                    "Android package manager rejected the APK: ${install.output.take(2_000)}",
+                    resumable = true,
+                )
+            }
+        }
+
+        jobs.stage(
+            jobId,
+            stage = "VERIFYING_INSTALLED",
+            detail = "Verifying installed base.apk against exact artifact SHA-256.",
+            cancellable = false,
+            resumable = true,
+        )
+        val installedSha = installedPackageSha256(archive.packageName)
+        if (!installedSha.equals(artifact.sha256, ignoreCase = true)) {
+            return fail(
+                responseRequestId,
+                risk,
+                started,
+                jobId,
+                "Package manager completed, but installed base.apk SHA '$installedSha' does not match artifact ${artifact.sha256}.",
+                resumable = true,
+            )
+        }
+
+        var launchDetail = ""
+        if (request.autoLaunch) {
+            jobs.stage(jobId, "LAUNCHING", "Launching verified ${archive.packageName}.", cancellable = false, resumable = true)
+            val launch = runCatching {
+                privileged.execute("monkey -p ${archive.packageName} -c android.intent.category.LAUNCHER 1", 15)
+            }.getOrElse { failure ->
+                return fail(responseRequestId, risk, started, jobId, "APK installed and verified, but launch failed: ${message(failure)}", resumable = true)
+            }
+            if (launch.timedOut || (launch.exitCode != null && launch.exitCode != 0)) {
+                return fail(responseRequestId, risk, started, jobId, "APK installed and verified, but launch failed: ${launch.output.take(2_000)}", resumable = true)
+            }
+            launchDetail = " and launched"
+        }
+
+        val output = JSONObject()
+            .put("jobId", jobId)
+            .put("packageName", archive.packageName)
+            .put("label", archive.label)
+            .put("apkSha256", artifact.sha256)
+            .put("artifactCacheHit", artifact.cacheHit)
+            .put("artifactResumedFromBytes", artifact.resumedBytes)
+            .put("downloadedBytes", artifact.sizeBytes)
+            .put("installedBaseApkSha256", installedSha)
+            .put("savedToProject", record != null)
+            .put("projectId", record?.projectId.orEmpty())
+            .put("apkRecordId", record?.id.orEmpty())
+            .put("archiveTitle", record?.title.orEmpty())
+            .put("archiveDescription", record?.description.orEmpty())
+            .put("transport", privileged.activeTransportLabel())
+            .put("launched", request.autoLaunch)
+            .toString(2)
+
+        val detail = buildString {
+            append("Durable job '$jobId' downloaded/verified and unattended-installed ")
+            append(archive.packageName)
+            if (record != null) append("; exact bytes saved to project ${record.projectId}")
+            append(launchDetail)
+            append("; installed SHA verified.")
+        }
+        jobs.succeed(jobId, detail, output)
+        return BridgeResult(
+            requestId = responseRequestId,
+            status = BridgeResultStatus.SUCCESS,
+            risk = risk,
+            detail = detail,
+            output = output,
+            durationMs = System.currentTimeMillis() - started,
+        )
     }
 
     private suspend fun archiveToProject(
@@ -246,132 +429,50 @@ class RemoteApkInstallCoordinator(
             }
             return project
         }
-
         val matches = projects.filter { it.packageName == packageName }
         return when (matches.size) {
             0 -> null
             1 -> matches.single()
-            else -> error("Multiple APKbox projects contain $packageName. Supply projectId so the downloaded APK cannot be archived to the wrong project.")
+            else -> error("Multiple APKbox projects contain $packageName. Supply projectId so the artifact cannot be archived to the wrong project.")
         }
     }
-
-    private fun download(
-        initialUrl: String,
-        requiresToken: Boolean,
-        token: String?,
-        target: File,
-    ): Long {
-        var current = URL(initialUrl)
-        if (requiresToken) {
-            require(!token.isNullOrBlank()) { "Build-source token is missing." }
-            require(isGitHubCredentialHost(current.host)) {
-                "Authenticated APK sources must begin on GitHub; APKbox will never send the build-source token to another host."
-            }
-        }
-
-        repeat(MAX_REDIRECTS + 1) { redirectIndex ->
-            check(current.protocol.equals("https", ignoreCase = true)) { "APK redirects must stay on HTTPS." }
-
-            val connection = current.openConnection() as HttpURLConnection
-            connection.instanceFollowRedirects = false
-            connection.requestMethod = "GET"
-            connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = READ_TIMEOUT_MS
-            connection.setRequestProperty("User-Agent", "APKbox-Remote-APK-Install")
-            connection.setRequestProperty("Accept", "application/vnd.android.package-archive, application/octet-stream")
-            if (requiresToken && !token.isNullOrBlank() && isGitHubCredentialHost(current.host)) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-            }
-
-            val code = connection.responseCode
-            if (code in 300..399) {
-                val location = connection.getHeaderField("Location")
-                    ?: run {
-                        connection.disconnect()
-                        error("APK download redirect did not contain a Location header.")
-                    }
-                connection.disconnect()
-                check(redirectIndex < MAX_REDIRECTS) { "Too many APK download redirects." }
-                current = URL(current, location)
-                return@repeat
-            }
-
-            try {
-                check(code in 200..299) { "APK download HTTP $code." }
-                val declared = connection.contentLengthLong
-                if (declared > MAX_APK_BYTES) error("APK download exceeds APKbox's ${MAX_APK_BYTES}-byte safety limit.")
-
-                target.parentFile?.mkdirs()
-                var written = 0L
-                BufferedInputStream(connection.inputStream, BUFFER_BYTES).use { input ->
-                    BufferedOutputStream(FileOutputStream(target), BUFFER_BYTES).use { output ->
-                        val buffer = ByteArray(BUFFER_BYTES)
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            if (count == 0) continue
-                            written += count
-                            check(downloadedBytesWithinLimit(written)) { "APK download exceeded APKbox's safety limit." }
-                            output.write(buffer, 0, count)
-                        }
-                        output.flush()
-                    }
-                }
-                check(written > 0L && target.isFile && target.length() == written) { "APK download produced an incomplete file." }
-                if (declared >= 0L) check(written == declared) { "APK download ended at $written of $declared bytes." }
-                return written
-            } finally {
-                connection.disconnect()
-            }
-        }
-        error("Too many APK download redirects.")
-    }
-
-    private fun downloadedBytesWithinLimit(bytes: Long): Boolean = bytes <= MAX_APK_BYTES
 
     private suspend fun installedPackageSha256(packageName: String): String {
         val pathResult = runCatching { privileged.execute("pm path $packageName", 10) }.getOrNull() ?: return ""
         val path = pathResult.output.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("package:") && it.endsWith("/base.apk") }
-            ?.removePrefix("package:")
-            ?: return ""
+            ?.removePrefix("package:") ?: return ""
         if (!path.matches(Regex("[/A-Za-z0-9._=:+-]+"))) return ""
         val hashResult = runCatching { privileged.execute("sha256sum $path", 30) }.getOrNull() ?: return ""
         return Regex("(?i)^[0-9a-f]{64}").find(hashResult.output.trim())?.value?.lowercase().orEmpty()
     }
 
-    private fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered(BUFFER_BYTES).use { input ->
-            val buffer = ByteArray(BUFFER_BYTES)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                if (count > 0) digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    private fun isGitHubCredentialHost(host: String): Boolean {
-        val lower = host.lowercase()
-        return lower == "github.com" || lower == "api.github.com" || lower.endsWith(".github.com")
-    }
-
-    private fun failed(
-        request: BridgeRequest,
-        risk: BridgeRisk,
-        started: Long,
-        detail: String,
-    ) = BridgeResult(
-        requestId = request.id,
-        status = BridgeResultStatus.FAILED,
+    private fun cancelledResult(requestId: String, risk: BridgeRisk, started: Long, jobId: String) = BridgeResult(
+        requestId = requestId,
+        status = BridgeResultStatus.DENIED,
         risk = risk,
-        detail = detail.take(4_096),
+        detail = "Job '$jobId' cancelled at a safe boundary.",
         durationMs = System.currentTimeMillis() - started,
     )
+
+    private fun fail(
+        requestId: String,
+        risk: BridgeRisk,
+        started: Long,
+        jobId: String,
+        detail: String,
+        resumable: Boolean,
+    ): BridgeResult {
+        runCatching { jobs.fail(jobId, detail, resumable) }
+        return BridgeResult(
+            requestId = requestId,
+            status = BridgeResultStatus.FAILED,
+            risk = risk,
+            detail = detail.take(4_096),
+            durationMs = System.currentTimeMillis() - started,
+        )
+    }
 
     private fun message(failure: Throwable): String = failure.message ?: failure.javaClass.simpleName
 }
