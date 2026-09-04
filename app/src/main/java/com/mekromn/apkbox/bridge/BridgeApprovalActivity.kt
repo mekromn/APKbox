@@ -159,6 +159,25 @@ private fun ApprovalScreen(
                 InfoSection("Build ID", request.buildId.ifBlank { "Not supplied" })
                 InfoSection("Run ID", request.runId.ifBlank { "Not supplied" })
             }
+            if (request.type == BridgeCommandType.APK_INSTALL_URL) {
+                InfoSection("APK source", request.downloadUrl)
+                if (request.packageName.isNotBlank()) InfoSection("Expected package", request.packageName)
+                InfoSection(
+                    "Expected SHA-256",
+                    request.expectedApkSha256.ifBlank { "Not supplied · APKbox will compute and report the downloaded APK SHA-256" },
+                )
+                InfoSection("Authenticated build source", if (request.requiresBuildToken) "Yes · use encrypted APKbox build-source token" else "No")
+                InfoSection("Save to APKbox project", if (request.saveToProject) "Yes" else "No · temporary APK is deleted after verified install")
+                if (request.saveToProject) {
+                    InfoSection("Project", request.projectId.ifBlank { "Auto-resolve by package; create a project if none exists" })
+                    if (request.projectName.isNotBlank()) InfoSection("New project name", request.projectName)
+                    if (request.displayName.isNotBlank()) InfoSection("APK display/file name", request.displayName)
+                    if (request.archiveTitle.isNotBlank()) InfoSection("APK title", request.archiveTitle)
+                    if (request.archiveDescription.isNotBlank()) InfoSection("APK description", request.archiveDescription)
+                }
+                InfoSection("Downgrade", if (request.allowDowngrade) "Allowed" else "Not allowed")
+                InfoSection("Launch after install", if (request.autoLaunch) "Yes" else "No")
+            }
             if (request.imagePath.isNotBlank()) {
                 InfoSection("Private Continuity image", request.imagePath)
             }
@@ -190,6 +209,8 @@ private fun ApprovalScreen(
                         "This approves one bounded autonomous execution for the named run. Plan start/resume never inherit an earlier trusted session."
                     request.type == BridgeCommandType.BUILD_START ->
                         "This may download, archive, install, downgrade, launch, and optionally test the exact build candidate described in Continuity. APKbox always requires a fresh on-device approval for BUILD_START."
+                    request.type == BridgeCommandType.APK_INSTALL_URL ->
+                        "This downloads the complete APK before installation, computes SHA-256, verifies package/SHA constraints, optionally archives the exact bytes, unattended-installs through Shizuku/Sui or Wireless ADB, and verifies installed base.apk SHA-256. It always requires a fresh approval. Signature-conflicting installed apps are never silently removed."
                     pending.risk == BridgeRisk.READ_ONLY ->
                         "Read-only debugging can be covered by a temporary trusted session."
                     pending.risk == BridgeRisk.DEBUG_ACTION ->
@@ -212,6 +233,7 @@ private fun confirmLabel(type: BridgeCommandType): String = when (type) {
     BridgeCommandType.AGENT_START -> "Start plan"
     BridgeCommandType.AGENT_RESUME -> "Resume plan"
     BridgeCommandType.BUILD_START -> "Start build"
+    BridgeCommandType.APK_INSTALL_URL -> "Install APK"
     else -> "Allow once"
 }
 
@@ -259,6 +281,7 @@ private fun requestSummaryForApproval(request: BridgeRequest): String = when (re
     BridgeCommandType.MESSAGE_FULL_WINDOW -> "Open a full-window APKbox message"
     BridgeCommandType.MESSAGE_HEADS_UP -> "Show an expandable heads-up notification"
     BridgeCommandType.PICTURE_MESSAGE -> "Fetch and show a private Continuity image with title/caption"
+    BridgeCommandType.APK_INSTALL_URL -> "Download and unattended-install an APK directly from an HTTPS URL${if (request.saveToProject) ", saving the exact verified APK to an APKbox project" else ""}"
     BridgeCommandType.UI_SNAPSHOT -> "Inspect the current UI hierarchy${request.packageName.takeIf { it.isNotBlank() }?.let { " for $it" }.orEmpty()}"
     BridgeCommandType.SCREENSHOT -> "Capture the current screen as a private Continuity artifact"
     BridgeCommandType.UI_TAP -> "Tap (${request.x}, ${request.y}) inside ${request.packageName}"
