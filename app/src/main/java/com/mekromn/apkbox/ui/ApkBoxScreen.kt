@@ -116,6 +116,7 @@ fun ApkBoxScreen(
     val visibleRevisions = revisions.filter { record ->
         (!starredOnly || record.starred) && (
             query.isBlank() || listOf(
+                record.title,
                 record.displayName,
                 record.label,
                 record.versionName,
@@ -290,7 +291,10 @@ fun ApkBoxScreen(
                 ) {
                     StoredApkIcon(record, Modifier.size(52.dp), record.label)
                     Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(record.displayName, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(record.title.ifBlank { record.displayName }, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (record.title.isNotBlank()) {
+                            Text(record.displayName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         Text(
                             "${record.versionName} · code ${record.versionCode}",
                             style = MaterialTheme.typography.labelMedium,
@@ -343,7 +347,7 @@ fun ApkBoxScreen(
     deleteCandidate?.let { record ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
-            title = { Text("Delete ${record.displayName}?") },
+            title = { Text("Delete ${record.title.ifBlank { record.displayName }}?") },
             text = { Text("Unused chunks will be removed; chunks shared by other revisions or projects stay in the global vault.") },
             confirmButton = {
                 TextButton(onClick = { deleteCandidate = null; onDelete(record) }) { Text("Delete") }
@@ -360,6 +364,9 @@ fun ApkBoxScreen(
             title = { Text("APK details") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (record.title.isNotBlank()) {
+                        Text(record.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
                     Text(record.displayName, style = MaterialTheme.typography.labelLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     OutlinedTextField(
                         value = description,
@@ -593,7 +600,7 @@ private fun CompactApkRow(
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        record.displayName,
+                        record.title.ifBlank { record.displayName },
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
@@ -608,6 +615,15 @@ private fun CompactApkRow(
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
+                }
+                if (record.title.isNotBlank()) {
+                    Text(
+                        record.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 Text(
                     "${record.label} · ${record.versionName} · code ${record.versionCode}",
