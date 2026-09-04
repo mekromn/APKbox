@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -92,6 +93,30 @@ class GitHubRelayClient {
         candidate
     }
 
+    /**
+     * Fetch a picture message only from this device's private Continuity relay subtree. The GitHub
+     * token remains local to APKbox; arbitrary external URLs are intentionally unsupported.
+     */
+    suspend fun fetchMessageImage(
+        config: BridgeConfig,
+        token: String,
+        repositoryPath: String,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val safePath = repositoryPath.trim()
+        val allowedPrefixes = listOf(
+            "bridge/devices/${config.deviceId}/artifacts/",
+            "bridge/devices/${config.deviceId}/message-assets/",
+        )
+        require(safePath.isNotBlank() && !safePath.contains("..") && allowedPrefixes.any(safePath::startsWith)) {
+            "Picture imagePath must be inside this device's Continuity artifacts or message-assets directory."
+        }
+        requestBytes(
+            token = token,
+            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(safePath)}",
+            maxBytes = MAX_ARTIFACT_BYTES,
+        )
+    }
+
     suspend fun writeAgentCheckpoint(
         config: BridgeConfig,
         token: String,
@@ -164,7 +189,7 @@ class GitHubRelayClient {
     ) = withContext(Dispatchers.IO) {
         val adbStatus = privilegedStatus.adb
         val json = JSONObject()
-            .put("schema", 5)
+            .put("schema", 6)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
@@ -187,11 +212,14 @@ class GitHubRelayClient {
             .put("trustedUntilEpochMs", config.trustedUntilEpochMs)
             .put("allowInformational", config.allowInformational)
             .put("allowPopups", config.allowPopups)
+            .put("messagePresentation", config.messagePresentation.name)
+            .put("approvalPresentation", config.approvalPresentation.name)
             .put("lastSeenEpochMs", System.currentTimeMillis())
             // Backward-compatible flat capability names. New agents should use remoteCommandTypes
             // and advancedWorkflows added by BridgeCapabilityCatalog below.
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
+                "message_small_popup", "message_always_on_top", "message_full_window", "message_heads_up", "picture_message",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
                 "agent_start", "agent_resume", "agent_status", "build_start", "build_status",
                 "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint",
@@ -328,6 +356,45 @@ class GitHubRelayClient {
                 throw RelayHttpException(code, apiMessage?.takeIf { it.isNotBlank() } ?: "GitHub relay HTTP $code")
             }
             return HttpResponse(code, text)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun requestBytes(token: String, path: String, maxBytes: Int): ByteArray {
+        require(token.isNotBlank()) { "Relay token is missing." }
+        val connection = URL(API_ROOT + path).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 20_000
+            connection.setRequestProperty("Authorization", "Bearer $token")
+            connection.setRequestProperty("Accept", "application/vnd.github.raw+json")
+            connection.setRequestProperty("X-GitHub-Api-Version", API_VERSION)
+            connection.setRequestProperty("User-Agent", "APKbox-Remote-Bridge")
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val error = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(8_000) }.orEmpty()
+                val apiMessage = runCatching { JSONObject(error).optString("message") }.getOrNull()
+                throw RelayHttpException(code, apiMessage?.takeIf { it.isNotBlank() } ?: "GitHub relay HTTP $code")
+            }
+            val declared = connection.contentLengthLong
+            require(declared < 0L || declared <= maxBytes.toLong()) { "Picture message exceeds the $maxBytes-byte relay limit." }
+            val output = ByteArrayOutputStream(minOf(maxBytes, 256 * 1024))
+            connection.inputStream.use { input ->
+                val buffer = ByteArray(32 * 1024)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    require(total <= maxBytes) { "Picture message exceeds the $maxBytes-byte relay limit." }
+                    output.write(buffer, 0, count)
+                }
+            }
+            val bytes = output.toByteArray()
+            require(bytes.isNotEmpty()) { "Picture message image is empty." }
+            return bytes
         } finally {
             connection.disconnect()
         }
