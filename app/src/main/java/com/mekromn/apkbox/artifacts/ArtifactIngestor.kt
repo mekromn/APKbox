@@ -35,6 +35,9 @@ data class IngestedArtifact(
  * Shared exact-byte ingest layer for APKbox. Network consumers should use this instead of growing
  * their own downloader. Artifacts are resumed into a per-job .part file, then hashed and promoted
  * into a SHA-256 content-addressed store. A known expected SHA can reuse an existing exact object.
+ * Local exact sources can be adopted into the same store after SHA proof, so all consumers share
+ * one cache regardless of whether the fastest source was network, installed app, build output, or
+ * APKbox's vault.
  */
 class ArtifactIngestor(context: Context) {
     companion object {
@@ -68,6 +71,81 @@ class ArtifactIngestor(context: Context) {
         }
         file.setLastModified(System.currentTimeMillis())
         return file
+    }
+
+    /**
+     * Promote any already-local exact source into the shared SHA-addressed cache. This is the
+     * bridge between APKbox vault reconstruction, installed base.apk, durable-job output, and the
+     * network ingest path. No local source is trusted by location/name: bytes are hashed first.
+     */
+    fun adoptLocalFile(
+        source: File,
+        expectedSha256: String = "",
+        deleteSource: Boolean = false,
+    ): IngestedArtifact {
+        require(source.isFile && source.canRead() && source.length() > 0L) {
+            "Local artifact source is missing, unreadable, or empty."
+        }
+        val expected = expectedSha256.trim().lowercase()
+        if (expected.isNotBlank()) {
+            require(SHA_REGEX.matches(expected)) {
+                "Expected artifact SHA-256 must be exactly 64 hexadecimal characters."
+            }
+        }
+
+        val actual = sha256(source)
+        if (expected.isNotBlank()) {
+            check(actual == expected) {
+                "Local artifact SHA-256 mismatch. Expected $expected, got $actual."
+            }
+        }
+
+        val target = objectFile(actual)
+        target.parentFile?.mkdirs()
+        var cacheHit = false
+        if (target.isFile) {
+            val cachedSha = sha256(target)
+            check(cachedSha == actual) {
+                "Content-addressed artifact cache collision/corruption detected."
+            }
+            cacheHit = true
+            if (deleteSource && source.absolutePath != target.absolutePath) source.delete()
+        } else if (source.absolutePath == target.absolutePath) {
+            cacheHit = true
+        } else {
+            val sameFilesystemMove = deleteSource && runCatching { source.renameTo(target) }.getOrDefault(false)
+            if (!sameFilesystemMove) {
+                val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
+                temp.delete()
+                source.inputStream().buffered(BUFFER_BYTES).use { input ->
+                    FileOutputStream(temp).buffered(BUFFER_BYTES).use { output ->
+                        input.copyTo(output, BUFFER_BYTES)
+                        output.flush()
+                    }
+                }
+                check(temp.length() == source.length() && sha256(temp) == actual) {
+                    temp.delete()
+                    "Local artifact copy verification failed."
+                }
+                if (!temp.renameTo(target)) {
+                    temp.copyTo(target, overwrite = false)
+                    temp.delete()
+                }
+                check(sha256(target) == actual) { "Promoted artifact failed final SHA-256 verification." }
+                if (deleteSource) source.delete()
+            }
+        }
+
+        target.setLastModified(System.currentTimeMillis())
+        pruneCache(DEFAULT_CACHE_LIMIT_BYTES, preserve = setOf(target.absolutePath))
+        return IngestedArtifact(
+            sha256 = actual,
+            sizeBytes = target.length(),
+            file = target,
+            sourceUrl = "local://${source.name}",
+            resumedBytes = 0L,
+            cacheHit = cacheHit,
+        )
     }
 
     fun ingest(
@@ -211,9 +289,10 @@ class ArtifactIngestor(context: Context) {
     }
 
     fun pruneCache(maxBytes: Long = DEFAULT_CACHE_LIMIT_BYTES, preserve: Set<String> = emptySet()) {
-        val files = objects.listFiles { file -> file.isFile && SHA_REGEX.matches(file.name) }
-            .orEmpty()
+        val files = objects.walkTopDown()
+            .filter { it.isFile && SHA_REGEX.matches(it.name) }
             .sortedBy { it.lastModified() }
+            .toList()
         var total = files.sumOf { it.length() }
         for (file in files) {
             if (total <= maxBytes) break
