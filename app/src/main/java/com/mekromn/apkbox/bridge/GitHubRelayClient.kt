@@ -93,10 +93,7 @@ class GitHubRelayClient {
         candidate
     }
 
-    /**
-     * Fetch a picture message only from this device's private Continuity relay subtree. The GitHub
-     * token remains local to APKbox; arbitrary external URLs are intentionally unsupported.
-     */
+    /** Fetch a picture only from this device's private Continuity relay subtree. */
     suspend fun fetchMessageImage(
         config: BridgeConfig,
         token: String,
@@ -189,15 +186,13 @@ class GitHubRelayClient {
     ) = withContext(Dispatchers.IO) {
         val adbStatus = privilegedStatus.adb
         val json = JSONObject()
-            .put("schema", 6)
+            .put("schema", 7)
             .put("deviceId", config.deviceId)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
             .put("androidApi", Build.VERSION.SDK_INT)
             .put("androidRelease", Build.VERSION.RELEASE)
             .put("bridgeEnabled", config.enabled)
-            // Legacy ADB fields remain for older agents while the richer privilegedTransport object
-            // is authoritative for current builds.
             .put("adbPaired", config.paired)
             .put("adbConnected", adbStatus.connected)
             .put("adbHealPhase", adbStatus.healPhase.name)
@@ -215,14 +210,18 @@ class GitHubRelayClient {
             .put("messagePresentation", config.messagePresentation.name)
             .put("approvalPresentation", config.approvalPresentation.name)
             .put("lastSeenEpochMs", System.currentTimeMillis())
-            // Backward-compatible flat capability names. New agents should use remoteCommandTypes
-            // and advancedWorkflows added by BridgeCapabilityCatalog below.
+            // Backward-compatible flat names. Current agents should prefer BridgeCapabilityCatalog.
             .put("capabilities", JSONArray(listOf(
                 "shell", "logcat", "app_logcat", "dumpsys", "launch", "toast", "notification", "popup",
                 "message_small_popup", "message_always_on_top", "message_full_window", "message_heads_up", "picture_message",
+                "apk_install_url", "job_list", "job_status", "job_cancel", "job_resume",
+                "project_list", "project_get", "apk_list", "apk_search", "apk_inspect", "apk_pull",
+                "package_state", "installed_apps", "device_state",
                 "ui_snapshot", "screenshot", "ui_tap", "ui_find_tap", "ui_swipe", "ui_text", "ui_key", "ui_wait",
                 "agent_start", "agent_resume", "agent_status", "build_start", "build_status",
                 "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint",
+                "universal_durable_jobs", "content_addressed_artifact_cache", "fastest_exact_source_resolution",
+                "exact_apk_inventory_inspection", "exact_apk_chunked_pull",
                 "unattended_verified_install", "privileged_transport_shizuku_sui_or_wireless_adb",
                 "wireless_adb_auto_heal", "wireless_adb_persistent_self_start"
             )))
