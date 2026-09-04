@@ -18,14 +18,17 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /**
  * Process-local always-on-top informational bridge popup.
  *
- * This is deliberately informational only: command approvals keep their independent persistent
- * notification path and are never accepted through this overlay. TYPE_APPLICATION_OVERLAY requires
- * the user's explicit Android "Display over other apps" grant.
+ * This is deliberately informational only: command approvals keep their independent local approval
+ * path and are never accepted through this overlay. TYPE_APPLICATION_OVERLAY requires the user's
+ * explicit Android "Display over other apps" grant.
  */
 object BridgeOverlayController {
     private val main = Handler(Looper.getMainLooper())
@@ -42,12 +45,21 @@ object BridgeOverlayController {
     ): Boolean {
         if (!canDraw(context)) return false
         val appContext = context.applicationContext
-        return if (Looper.myLooper() == Looper.getMainLooper()) {
-            showOnMain(appContext, popup, stateStore)
-        } else {
-            main.post { showOnMain(appContext, popup, stateStore) }
-            true
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return showOnMain(appContext, popup, stateStore)
         }
+
+        val result = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        if (!main.post {
+                try {
+                    result.set(showOnMain(appContext, popup, stateStore))
+                } finally {
+                    latch.countDown()
+                }
+            }
+        ) return false
+        return runCatching { latch.await(2, TimeUnit.SECONDS) && result.get() }.getOrDefault(false)
     }
 
     fun dismiss(context: Context, stateStore: BridgeStateStore? = null) {
@@ -98,19 +110,22 @@ object BridgeOverlayController {
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
         }
-        card.addView(eyebrow, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ))
+        card.addView(
+            eyebrow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
 
-        val title = TextView(context).apply {
+        val titleView = TextView(context).apply {
             text = popup.title.ifBlank { "ChatGPT via APKbox" }
             setTextColor(if (dark) Color.WHITE else Color.rgb(30, 30, 34))
             textSize = 21f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, dp(7), 0, dp(10))
         }
-        card.addView(title)
+        card.addView(titleView)
 
         val bodyText = TextView(context).apply {
             text = popup.message.ifBlank { "No message was supplied." }
@@ -120,15 +135,21 @@ object BridgeOverlayController {
         }
         val scroll = ScrollView(context).apply {
             isFillViewport = false
-            addView(bodyText, ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT,
-            ))
+            addView(
+                bodyText,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
-        card.addView(scroll, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(260),
-        ))
+        card.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(260),
+            ),
+        )
 
         val actions = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -184,7 +205,7 @@ object BridgeOverlayController {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.FILL
-            title = "APKbox Bridge Message"
+            this.title = "APKbox Bridge Message"
         }
 
         return runCatching {
