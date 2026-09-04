@@ -1,0 +1,36 @@
+name: Apply APKbox platform hardening
+
+on:
+  push:
+    branches:
+      - feature/screen-agent
+    paths:
+      - scripts/apply_platform_hardening.py
+      - .github/workflows/platform-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/screen-agent
+          fetch-depth: 0
+      - name: Apply guarded hardening
+        run: python3 scripts/apply_platform_hardening.py
+      - name: Commit hardened sources and tests
+        run: |
+          if git diff --quiet; then
+            echo "No hardening changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/mekromn/apkbox app/src/test/java/com/mekromn/apkbox
+          git commit -m "Harden universal job and APK retrieval lifecycle"
+          git push origin HEAD:feature/screen-agent
