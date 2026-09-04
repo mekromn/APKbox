@@ -37,6 +37,24 @@ enum class BridgeMessagePresentation(
     ),
 }
 
+enum class BridgeApprovalPresentation(
+    val displayName: String,
+    val description: String,
+) {
+    NOTIFICATION(
+        "Notification",
+        "Current behavior: persistent high-priority approval notification with Deny/Allow actions.",
+    ),
+    ALWAYS_ON_TOP(
+        "Always-on-top security popup",
+        "Show the full approval as a modal overlay above the current app instead of a notification.",
+    ),
+    BOTH(
+        "Popup + notification",
+        "Show the always-on-top security popup and keep the persistent notification as a second copy.",
+    ),
+}
+
 data class BridgeConfig(
     val enabled: Boolean,
     val repoOwner: String,
@@ -47,6 +65,7 @@ data class BridgeConfig(
     val allowPopups: Boolean,
     val messagePresentation: BridgeMessagePresentation,
     val keepNotificationCopy: Boolean,
+    val approvalPresentation: BridgeApprovalPresentation,
     val trustedUntilEpochMs: Long,
     val paired: Boolean,
     val hasRelayToken: Boolean,
@@ -85,6 +104,9 @@ class BridgePreferences(context: Context) {
         putString("messagePresentation", value.name)
     }
     fun setKeepNotificationCopy(value: Boolean) = edit { putBoolean("keepNotificationCopy", value) }
+    fun setApprovalPresentation(value: BridgeApprovalPresentation) = edit {
+        putString("approvalPresentation", value.name)
+    }
     fun setPaired(value: Boolean) = edit { putBoolean("paired", value) }
     fun setTrustedUntil(epochMs: Long) = edit { putLong("trustedUntil", epochMs) }
     fun endTrustedSession() = setTrustedUntil(0L)
@@ -116,6 +138,12 @@ class BridgePreferences(context: Context) {
                     ?: BridgeMessagePresentation.POPUP_ACTIVITY.name
             )
         }.getOrDefault(BridgeMessagePresentation.POPUP_ACTIVITY)
+        val approvalPresentation = runCatching {
+            BridgeApprovalPresentation.valueOf(
+                prefs.getString("approvalPresentation", BridgeApprovalPresentation.NOTIFICATION.name)
+                    ?: BridgeApprovalPresentation.NOTIFICATION.name
+            )
+        }.getOrDefault(BridgeApprovalPresentation.NOTIFICATION)
         return BridgeConfig(
             enabled = prefs.getBoolean("enabled", false),
             repoOwner = prefs.getString("repoOwner", "mekromn") ?: "mekromn",
@@ -126,6 +154,7 @@ class BridgePreferences(context: Context) {
             allowPopups = prefs.getBoolean("allowPopups", true),
             messagePresentation = presentation,
             keepNotificationCopy = prefs.getBoolean("keepNotificationCopy", true),
+            approvalPresentation = approvalPresentation,
             trustedUntilEpochMs = prefs.getLong("trustedUntil", 0L),
             paired = prefs.getBoolean("paired", false),
             hasRelayToken = !secretStore.read().isNullOrBlank(),
