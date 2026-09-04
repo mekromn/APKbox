@@ -1,11 +1,13 @@
 package com.mekromn.apkbox.bridge
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -18,6 +20,7 @@ import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,6 +42,12 @@ class BridgeMessageActivity : ComponentActivity() {
             APKboxTheme {
                 BridgeMessageScreen(
                     popup = popup,
+                    onDisplayOptions = {
+                        startActivity(
+                            Intent(this, BridgeMessageDisplaySettingsActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        )
+                    },
                     onDismiss = {
                         store.clearPopup()
                         finishAndRemoveTask()
@@ -52,6 +61,7 @@ class BridgeMessageActivity : ComponentActivity() {
 @Composable
 private fun BridgeMessageScreen(
     popup: BridgePopupMessage?,
+    onDisplayOptions: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     Scaffold(
@@ -61,11 +71,22 @@ private fun BridgeMessageScreen(
                 modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
                 color = MaterialTheme.colorScheme.surface,
             ) {
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp).fillMaxWidth(),
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Got it")
+                    OutlinedButton(
+                        onClick = onDisplayOptions,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Display options")
+                    }
+                    Button(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Got it")
+                    }
                 }
             }
         },
