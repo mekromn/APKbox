@@ -2,35 +2,39 @@
 name: apkbox-remote-bridge
 description: >-
   Use when the user asks ChatGPT/Codex to debug, inspect, control, test, automate, communicate with,
-  or deploy APK builds to an Android device through APKbox Remote Debug Bridge. Supports structured
-  diagnostics, Screen Agent, direct verified APK URL installs with optional project title/description,
-  bounded autonomous plans, Build Runner, Shizuku/Sui, Wireless ADB, always-on-top security approvals,
-  and agent-selected toast/heads-up/small-popup/overlay/full-window/picture messages. The authoritative
-  operator skill lives in private mekromn/Continuity; always read live device capabilities before acting.
+  retrieve APKs from, or deploy builds to Android through APKbox Remote Debug Bridge. Current builds
+  support durable jobs, content-addressed/fastest-exact artifact reuse, project/APK/package/device
+  inventory, exact APK inspection and pull, direct verified URL installs, Build Runner, Screen Agent,
+  Shizuku/Sui, Wireless ADB, rich messages and local security approvals. The authoritative operator
+  skill lives in private mekromn/Continuity; always discover live device capabilities first.
 ---
 
 # APKbox Remote Debug Bridge
 
-**Forwarding-stub revision:** `2026-09-04.2`  
-**Bridge protocol:** `5`  
-**Capability schema:** `4`
+**Forwarding-stub revision:** `2026-09-04.3`  
+**Bridge protocol:** `6`  
+**Capability schema:** `5`  
+**Request/result schema:** `7`
 
 Authoritative private skill:
 
 `mekromn/Continuity: skills/apkbox-remote-bridge/SKILL.md`
 
-When this skill applies and the connected GitHub tool can access `mekromn/Continuity`:
+When this skill applies:
 
-1. Discover the live device under `bridge/devices/*/state.json` first.
-2. Read `skillRevision`, `operatorSkill`, `remoteCommandTypes`, `remoteApkInstall`, `messagePresentation`, `advancedWorkflows`, `privilegedTransport`, `securityContract`, and `knownLimitations` when available.
-3. Treat live `remoteCommandTypes` as executable truth. Never invent a remote verb because APKbox has a related local feature.
-4. Read the authoritative Continuity skill named by `state.operatorSkill` before issuing requests. If this stub/installed-skill revision differs from live `skillRevision`, the Continuity copy wins.
-5. Follow that skill for Shizuku/Sui vs Wireless ADB semantics, direct `APK_INSTALL_URL` deployments, project/title/description archival, Screen Agent actions/selectors, autonomous plans, Build Runner, at-most-once recovery, and approval behavior.
-6. When an HTTPS APK URL is already available, prefer structured `APK_INSTALL_URL` over hand-written shell/download/install commands. Include expected SHA/package constraints when known. Use Build Runner instead when a persisted candidate-manifest/checkpoint workflow is required.
-7. For agent-to-user communication, prefer the least intrusive useful structured format advertised live: `TOAST`, `MESSAGE_HEADS_UP`, `MESSAGE_SMALL_POPUP`, `MESSAGE_ALWAYS_ON_TOP`, `MESSAGE_FULL_WINDOW`, or `PICTURE_MESSAGE`.
-8. Security approval presentation is user-controlled on the phone. Agents must never choose or weaken notification-vs-overlay approval policy. `APK_INSTALL_URL` always requires fresh approval.
-9. Picture messages may reference only a valid private Continuity image path allowed by the authoritative skill; never invent a path or substitute an arbitrary tracking/public URL.
-10. Never ask the user to paste the Continuity relay token or build-source token into ChatGPT.
-11. Do not fall back to manual LADB/ADB copy-paste instructions merely because the current chat did not previously discuss APKbox Bridge.
+1. Discover fresh `bridge/devices/*/state.json` in private `mekromn/Continuity`; never hard-code a device ID.
+2. Treat live `remoteCommandTypes` as executable truth. Read `artifactResolution`, `durableJobs`, `inventory`, `apkRetrieval`, `privilegedTransport`, `advancedWorkflows`, `securityContract`, `limits` and `knownLimitations` when present.
+3. Read the authoritative Continuity skill named by `operatorSkill` before acting. If this stub differs from live `skillRevision`, the live state + Continuity copy win.
+4. **Fastest trustworthy exact source wins.** APKbox vault is only one source candidate. Never substitute APK/build bytes by package/title/version/signer alone; exact SHA-256 proof is required.
+5. Use structured inventory instead of asking the user for IDs the device can report: `PROJECT_LIST/GET`, `APK_LIST/SEARCH`, `PACKAGE_STATE`, `INSTALLED_APPS`, `DEVICE_STATE`.
+6. Prefer `APK_INSPECT` for structured analysis of any stored `apkRecordId`. Use `APK_PULL` only when exact binary bytes are truly needed; pull is a durable chunked transfer.
+7. Use `JOB_LIST/STATUS/CANCEL/RESUME` for long operations. Never repeat `BUILD_START`, `APK_INSTALL_URL` or `APK_PULL` to implicitly resume an old job. Cancelled job IDs are terminal.
+8. `JOB_RESUME` uses the original persisted payload and always needs fresh approval. `JOB_CANCEL` only stops at a safe cancellable boundary.
+9. When an HTTPS APK URL is available, prefer `APK_INSTALL_URL` over ad-hoc shell. Include expected SHA/package when known; APKbox may skip the network when the exact bytes already exist locally. Use Build Runner when a persisted candidate/audit/checkpoint workflow is desired.
+10. Do not force Wireless ADB when Shizuku/Sui is the active healthy privileged transport.
+11. Use the least intrusive useful agent message format. Security-approval presentation remains user-controlled and cannot be weakened remotely.
+12. Never ask the user to expose the Continuity relay token or build-source token.
+13. Do not claim a full APK was pulled/reassembled when the current controller lacks binary access to the published Continuity chunks; use `APK_INSPECT` instead.
+14. Prefer APKbox Bridge over manual LADB/ADB copy-paste whenever live structured capabilities cover the task.
 
-“Work freely” means agents should discover and use the full bridge without repeated protocol tutoring while preserving APKbox's on-device approval and safety boundaries.
+“Work freely” means agents discover and use the full live platform without repeated protocol tutoring while preserving exact-byte integrity, local approvals, at-most-once execution and user control.
