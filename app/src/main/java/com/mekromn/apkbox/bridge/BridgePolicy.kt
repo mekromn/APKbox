@@ -5,34 +5,13 @@ object BridgePolicy {
     private val runIdRegex = Regex("[A-Za-z0-9._-]{1,96}")
 
     private val readOnlyExact = setOf(
-        "id",
-        "whoami",
-        "uname",
-        "uptime",
-        "date",
-        "ps",
-        "top",
-        "df",
-        "mount",
-        "printenv",
+        "id", "whoami", "uname", "uptime", "date", "ps", "top", "df", "mount", "printenv",
     )
 
     private val readOnlyPrefixes = listOf(
-        "getprop",
-        "dumpsys",
-        "logcat -d",
-        "logcat --dump",
-        "pidof",
-        "pm list ",
-        "cmd package list ",
-        "cmd activity get-",
-        "settings get ",
-        "cat /proc/",
-        "cat /sys/",
-        "ls ",
-        "stat ",
-        "du ",
-        "wc ",
+        "getprop", "dumpsys", "logcat -d", "logcat --dump", "pidof", "pm list ",
+        "cmd package list ", "cmd activity get-", "settings get ", "cat /proc/", "cat /sys/",
+        "ls ", "stat ", "du ", "wc ",
     )
 
     private val mutatingTokens = listOf(
@@ -58,7 +37,18 @@ object BridgePolicy {
         BridgeCommandType.UI_SNAPSHOT,
         BridgeCommandType.SCREENSHOT,
         BridgeCommandType.AGENT_STATUS,
-        BridgeCommandType.BUILD_STATUS -> BridgeRisk.READ_ONLY
+        BridgeCommandType.BUILD_STATUS,
+        BridgeCommandType.JOB_LIST,
+        BridgeCommandType.JOB_STATUS,
+        BridgeCommandType.PROJECT_LIST,
+        BridgeCommandType.PROJECT_GET,
+        BridgeCommandType.APK_LIST,
+        BridgeCommandType.APK_SEARCH,
+        BridgeCommandType.APK_INSPECT,
+        BridgeCommandType.APK_PULL,
+        BridgeCommandType.PACKAGE_STATE,
+        BridgeCommandType.INSTALLED_APPS,
+        BridgeCommandType.DEVICE_STATE -> BridgeRisk.READ_ONLY
 
         BridgeCommandType.LAUNCH,
         BridgeCommandType.UI_TAP,
@@ -68,12 +58,12 @@ object BridgePolicy {
         BridgeCommandType.UI_KEY,
         BridgeCommandType.UI_WAIT,
         BridgeCommandType.AGENT_START,
-        BridgeCommandType.AGENT_RESUME -> BridgeRisk.DEBUG_ACTION
+        BridgeCommandType.AGENT_RESUME,
+        BridgeCommandType.JOB_CANCEL -> BridgeRisk.DEBUG_ACTION
 
-        // Both candidate-driven builds and direct URL installs can change installed package state.
-        // Classify from the maximum possible effect rather than trusting remote flags to lower risk.
         BridgeCommandType.BUILD_START,
-        BridgeCommandType.APK_INSTALL_URL -> BridgeRisk.MUTATING
+        BridgeCommandType.APK_INSTALL_URL,
+        BridgeCommandType.JOB_RESUME -> BridgeRisk.MUTATING
 
         BridgeCommandType.SHELL -> classifyShell(request.command)
     }
@@ -110,12 +100,6 @@ object BridgePolicy {
         else -> false
     }
 
-    /**
-     * Autonomous screen interaction needs both package scope and run/sequence scope. A one-off
-     * manually approved UI action may omit run metadata, but it can never inherit trusted-session
-     * auto-execution in that form. Advanced plan start/resume are intentionally excluded: approving
-     * a bounded autonomous execution is always a fresh on-device decision.
-     */
     private fun debugActionIsSafelyScoped(request: BridgeRequest): Boolean = when (request.type) {
         BridgeCommandType.LAUNCH -> validPackage(request.packageName)
         BridgeCommandType.UI_TAP,
@@ -124,6 +108,7 @@ object BridgePolicy {
         BridgeCommandType.UI_TEXT,
         BridgeCommandType.UI_KEY,
         BridgeCommandType.UI_WAIT -> validPackage(request.packageName) && validRunSequence(request)
+        BridgeCommandType.JOB_CANCEL -> runIdRegex.matches(request.jobId)
         BridgeCommandType.AGENT_START,
         BridgeCommandType.AGENT_RESUME -> false
         else -> false
@@ -138,7 +123,6 @@ object BridgePolicy {
     private fun classifyShell(raw: String): BridgeRisk {
         val command = raw.trim()
         if (command.isEmpty()) return BridgeRisk.DANGEROUS
-
         if (shellMetacharacters.containsMatchIn(command)) return BridgeRisk.DANGEROUS
 
         val lower = " ${command.lowercase()} "
@@ -148,7 +132,6 @@ object BridgePolicy {
         if (normalized in readOnlyExact || readOnlyPrefixes.any { normalized.startsWith(it) }) {
             return BridgeRisk.READ_ONLY
         }
-
         return BridgeRisk.DANGEROUS
     }
 }
