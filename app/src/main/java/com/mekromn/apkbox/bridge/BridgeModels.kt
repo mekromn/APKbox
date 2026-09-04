@@ -9,9 +9,18 @@ enum class BridgeCommandType {
     APP_LOGCAT,
     DUMPSYS,
     LAUNCH,
+
+    // Informational presentation toolkit. Legacy NOTIFICATION/POPUP remain for compatibility;
+    // explicit MESSAGE_* verbs let an agent choose the least intrusive useful presentation.
     TOAST,
     NOTIFICATION,
     POPUP,
+    MESSAGE_SMALL_POPUP,
+    MESSAGE_ALWAYS_ON_TOP,
+    MESSAGE_FULL_WINDOW,
+    MESSAGE_HEADS_UP,
+    PICTURE_MESSAGE,
+
     UI_SNAPSHOT,
     SCREENSHOT,
     UI_TAP,
@@ -56,6 +65,7 @@ data class BridgeRequest(
     val reason: String = "",
     val selector: String = "",
     val value: String = "",
+    val imagePath: String = "",
     val x: Int = -1,
     val y: Int = -1,
     val endX: Int = -1,
@@ -73,7 +83,7 @@ data class BridgeRequest(
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean = expiresAtEpochMs in 1 until now
 
     fun toJson(): JSONObject = JSONObject()
-        .put("schema", 3)
+        .put("schema", 4)
         .put("id", id)
         .put("type", type.name)
         .put("command", command)
@@ -84,6 +94,7 @@ data class BridgeRequest(
         .put("reason", reason)
         .put("selector", selector)
         .put("value", value)
+        .put("imagePath", imagePath)
         .put("x", x)
         .put("y", y)
         .put("endX", endX)
@@ -100,6 +111,7 @@ data class BridgeRequest(
 
     companion object {
         private val idRegex = Regex("[A-Za-z0-9._-]{1,96}")
+        private val relayImagePathRegex = Regex("[A-Za-z0-9._/-]{1,1024}")
 
         fun fromJson(json: JSONObject): BridgeRequest {
             val id = json.optString("id").trim()
@@ -108,8 +120,14 @@ data class BridgeRequest(
                 .getOrElse { error("Unsupported bridge command type.") }
             val runId = json.optString("runId").trim().take(96)
             val buildId = json.optString("buildId").trim().take(96)
+            val imagePath = json.optString("imagePath").trim().take(1_024)
             if (runId.isNotBlank()) require(idRegex.matches(runId)) { "Invalid bridge runId." }
             if (buildId.isNotBlank()) require(idRegex.matches(buildId)) { "Invalid bridge buildId." }
+            if (imagePath.isNotBlank()) {
+                require(relayImagePathRegex.matches(imagePath) && !imagePath.contains("..")) {
+                    "Invalid bridge imagePath."
+                }
+            }
             return BridgeRequest(
                 id = id,
                 type = type,
@@ -121,6 +139,7 @@ data class BridgeRequest(
                 reason = json.optString("reason").take(2_048),
                 selector = json.optString("selector").take(2_048),
                 value = json.optString("value").take(8_192),
+                imagePath = imagePath,
                 x = json.optInt("x", -1),
                 y = json.optInt("y", -1),
                 endX = json.optInt("endX", -1),
@@ -197,7 +216,7 @@ data class BridgeResult(
     val artifacts: List<BridgeArtifact> = emptyList(),
 ) {
     fun toJson(deviceId: String): JSONObject = JSONObject()
-        .put("schema", 3)
+        .put("schema", 4)
         .put("requestId", requestId)
         .put("deviceId", deviceId)
         .put("status", status.name)
