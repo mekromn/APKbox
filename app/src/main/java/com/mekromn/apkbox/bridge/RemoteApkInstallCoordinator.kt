@@ -262,12 +262,15 @@ class RemoteApkInstallCoordinator(
         target: File,
     ): Long {
         var current = URL(initialUrl)
+        if (requiresToken) {
+            require(!token.isNullOrBlank()) { "Build-source token is missing." }
+            require(isGitHubCredentialHost(current.host)) {
+                "Authenticated APK sources must begin on GitHub; APKbox will never send the build-source token to another host."
+            }
+        }
+
         repeat(MAX_REDIRECTS + 1) { redirectIndex ->
             check(current.protocol.equals("https", ignoreCase = true)) { "APK redirects must stay on HTTPS." }
-            if (requiresToken) {
-                require(!token.isNullOrBlank()) { "Build-source token is missing." }
-                require(isGitHubHost(current.host)) { "APKbox never sends the build-source token to a non-GitHub host." }
-            }
 
             val connection = current.openConnection() as HttpURLConnection
             connection.instanceFollowRedirects = false
@@ -276,7 +279,7 @@ class RemoteApkInstallCoordinator(
             connection.readTimeout = READ_TIMEOUT_MS
             connection.setRequestProperty("User-Agent", "APKbox-Remote-APK-Install")
             connection.setRequestProperty("Accept", "application/vnd.android.package-archive, application/octet-stream")
-            if (requiresToken && !token.isNullOrBlank()) {
+            if (requiresToken && !token.isNullOrBlank() && isGitHubCredentialHost(current.host)) {
                 connection.setRequestProperty("Authorization", "Bearer $token")
                 connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
             }
@@ -290,11 +293,7 @@ class RemoteApkInstallCoordinator(
                     }
                 connection.disconnect()
                 check(redirectIndex < MAX_REDIRECTS) { "Too many APK download redirects." }
-                val next = URL(current, location)
-                if (requiresToken && !isGitHubHost(next.host)) {
-                    error("Authenticated APK download attempted to redirect outside GitHub; token was not sent.")
-                }
-                current = next
+                current = URL(current, location)
                 return@repeat
             }
 
@@ -313,7 +312,7 @@ class RemoteApkInstallCoordinator(
                             if (count < 0) break
                             if (count == 0) continue
                             written += count
-                            check(written <= MAX_APK_BYTES) { "APK download exceeded APKbox's safety limit." }
+                            check(downloadedBytesWithinLimit(written)) { "APK download exceeded APKbox's safety limit." }
                             output.write(buffer, 0, count)
                         }
                         output.flush()
@@ -328,6 +327,8 @@ class RemoteApkInstallCoordinator(
         }
         error("Too many APK download redirects.")
     }
+
+    private fun downloadedBytesWithinLimit(bytes: Long): Boolean = bytes <= MAX_APK_BYTES
 
     private suspend fun installedPackageSha256(packageName: String): String {
         val pathResult = runCatching { privileged.execute("pm path $packageName", 10) }.getOrNull() ?: return ""
@@ -354,9 +355,9 @@ class RemoteApkInstallCoordinator(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun isGitHubHost(host: String): Boolean {
+    private fun isGitHubCredentialHost(host: String): Boolean {
         val lower = host.lowercase()
-        return lower == "github.com" || lower == "api.github.com" || lower.endsWith(".github.com") || lower.endsWith("githubusercontent.com")
+        return lower == "github.com" || lower == "api.github.com" || lower.endsWith(".github.com")
     }
 
     private fun failed(
