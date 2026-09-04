@@ -40,7 +40,21 @@ class BridgeModelsTest {
     }
 
     @Test
-    fun invalidAdvancedIdsAreRejectedDuringParsing() {
+    fun pictureMessageRoundTripPreservesPrivateImagePath() {
+        val original = BridgeRequest(
+            id = "picture-001",
+            type = BridgeCommandType.PICTURE_MESSAGE,
+            title = "Look here",
+            message = "This image shows the UI element I mean.",
+            imagePath = "bridge/devices/apkbox-pixel-test/message-assets/picture-001.png",
+            createdAtEpochMs = 1000L,
+            expiresAtEpochMs = 2000L,
+        )
+        assertEquals(original, BridgeRequest.fromJson(original.toJson()))
+    }
+
+    @Test
+    fun invalidAdvancedIdsAndImageTraversalAreRejectedDuringParsing() {
         val badRun = JSONObject()
             .put("id", "valid-id")
             .put("type", "AGENT_STATUS")
@@ -52,6 +66,12 @@ class BridgeModelsTest {
             .put("type", "BUILD_START")
             .put("buildId", "candidate/../../bad")
         assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badBuild) }
+
+        val badImage = JSONObject()
+            .put("id", "picture-002")
+            .put("type", "PICTURE_MESSAGE")
+            .put("imagePath", "bridge/devices/device/message-assets/../../secret.txt")
+        assertThrows(IllegalArgumentException::class.java) { BridgeRequest.fromJson(badImage) }
     }
 
     @Test
