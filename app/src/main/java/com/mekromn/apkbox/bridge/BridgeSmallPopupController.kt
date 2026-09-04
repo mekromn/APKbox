@@ -16,6 +16,9 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /** Compact, non-modal, auto-dismissing bridge message above the current app. */
@@ -32,8 +35,18 @@ object BridgeSmallPopupController {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return showOnMain(appContext, popup, durationMs)
         }
-        main.post { showOnMain(appContext, popup, durationMs) }
-        return true
+
+        val result = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        if (!main.post {
+                try {
+                    result.set(showOnMain(appContext, popup, durationMs))
+                } finally {
+                    latch.countDown()
+                }
+            }
+        ) return false
+        return runCatching { latch.await(2, TimeUnit.SECONDS) && result.get() }.getOrDefault(false)
     }
 
     fun dismiss(context: Context) {
@@ -112,7 +125,7 @@ object BridgeSmallPopupController {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP
-            title = "APKbox Bridge Small Message"
+            this.title = "APKbox Bridge Small Message"
         }
 
         return runCatching {
