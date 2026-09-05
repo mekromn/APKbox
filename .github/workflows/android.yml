@@ -78,6 +78,18 @@ jobs:
         if: steps.changes.outputs.runtime == 'true'
         run: sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"
 
+      - name: Expose and verify pinned Android SDK tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER_DIR="$ANDROID_HOME/build-tools/36.0.0"
+          test -x "$APKSIGNER_DIR/apksigner"
+          echo "$APKSIGNER_DIR" >> "$GITHUB_PATH"
+          if [ "${{ steps.changes.outputs.runtime }}" = "true" ]; then
+            test -x "$ANDROID_HOME/emulator/emulator"
+            echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          fi
+
       - name: Restore APKbox development signing key
         uses: actions/cache@v4
         with:
@@ -126,6 +138,7 @@ jobs:
             APK="app/build/outputs/apk/debug/app-debug.apk"
             sha="$(sha256sum "$APK" | awk '{print $1}')"
             signer="$(apksigner verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {print $2; exit}')"
+            test -n "$signer"
             echo "candidate_sha=$sha" >> "$GITHUB_OUTPUT"
             echo "candidate_signer=$signer" >> "$GITHUB_OUTPUT"
             printf 'candidateSha256=%s\ncandidateSignerSha256=%s\n' "$sha" "$signer" > "$RUNNER_TEMP/apkbox-candidate-identity.txt"
