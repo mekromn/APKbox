@@ -1,4 +1,4 @@
-name: Build APKbox
+name: Build APKbox + Android 16 Emulator
 
 on:
   push:
@@ -11,6 +11,7 @@ concurrency:
 
 env:
   APKBOX_KEYSTORE: /home/runner/.apkbox-signing/debug.keystore
+  APKBOX_AVD: apkbox-api36
 
 permissions:
   contents: read
@@ -37,8 +38,14 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 16 SDK
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Install Android 16 SDK and emulator image
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-36;google_apis;x86_64"
 
       - name: Restore APKbox development signing key
         uses: actions/cache@v4
@@ -70,7 +77,7 @@ jobs:
             -storepass android \
             -alias androiddebugkey | grep 'SHA256:'
 
-      - name: Test and build debug APK
+      - name: Unit test and build debug APK
         shell: bash
         run: |
           set +e
@@ -80,16 +87,115 @@ jobs:
           tail -n 220 "$RUNNER_TEMP/apkbox-build.log"
           exit $status
 
-      - name: Upload bridge CI diagnostics
+      - name: Create and boot Android 16 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo no | avdmanager create avd \
+            --force \
+            --name "$APKBOX_AVD" \
+            --package "system-images;android-36;google_apis;x86_64"
+
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm || true
+          fi
+
+          nohup emulator \
+            -avd "$APKBOX_AVD" \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -no-snapshot \
+            -wipe-data \
+            -gpu swiftshader_indirect \
+            > "$RUNNER_TEMP/apkbox-emulator.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/apkbox-emulator.pid"
+
+          adb wait-for-device
+          booted=0
+          for _ in $(seq 1 150); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              booted=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$booted" -ne 1 ]; then
+            echo "Android 16 emulator failed to complete boot" >&2
+            tail -n 200 "$RUNNER_TEMP/apkbox-emulator.log" || true
+            exit 1
+          fi
+
+          adb shell settings put global window_animation_scale 0 || true
+          adb shell settings put global transition_animation_scale 0 || true
+          adb shell settings put global animator_duration_scale 0 || true
+          adb shell getprop > "$RUNNER_TEMP/apkbox-emulator-getprop.txt"
+          adb shell wm size > "$RUNNER_TEMP/apkbox-emulator-wm.txt"
+          adb shell wm density >> "$RUNNER_TEMP/apkbox-emulator-wm.txt"
+
+      - name: Android 16 APKbox runtime smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          PKG="com.mekromn.apkbox"
+          COMPONENT="$PKG/.MainActivity"
+
+          adb install -r "$APK" | tee "$RUNNER_TEMP/apkbox-emulator-install.txt"
+          adb shell am force-stop "$PKG" || true
+          adb logcat -c
+
+          adb shell am start -W -n "$COMPONENT" | tee "$RUNNER_TEMP/apkbox-emulator-launch.txt"
+          sleep 4
+
+          pid="$(adb shell pidof "$PKG" | tr -d '\r' | awk '{print $1}')"
+          if [ -z "$pid" ]; then
+            echo "APKbox process is not alive after launch on Android 16" >&2
+            adb logcat -d -v threadtime > "$RUNNER_TEMP/apkbox-emulator-logcat.txt" || true
+            exit 1
+          fi
+          echo "$pid" > "$RUNNER_TEMP/apkbox-emulator-pid.txt"
+
+          adb shell dumpsys activity activities > "$RUNNER_TEMP/apkbox-emulator-activities.txt"
+          adb shell dumpsys activity top > "$RUNNER_TEMP/apkbox-emulator-activity-top.txt"
+          adb shell dumpsys package "$PKG" > "$RUNNER_TEMP/apkbox-emulator-package.txt"
+          adb shell dumpsys meminfo "$PKG" > "$RUNNER_TEMP/apkbox-emulator-meminfo.txt"
+          adb logcat --pid="$pid" -d -v threadtime > "$RUNNER_TEMP/apkbox-emulator-app-logcat.txt" || true
+          adb logcat -d -v threadtime -t 2500 > "$RUNNER_TEMP/apkbox-emulator-logcat.txt" || true
+
+          if ! grep -q "$PKG" "$RUNNER_TEMP/apkbox-emulator-activities.txt"; then
+            echo "APKbox did not appear in Android 16 activity state after launch" >&2
+            exit 1
+          fi
+
+          if grep -E "FATAL EXCEPTION|Process $PKG has died|Force finishing activity.*$PKG" "$RUNNER_TEMP/apkbox-emulator-logcat.txt"; then
+            echo "APKbox fatal runtime signal detected on Android 16 emulator" >&2
+            exit 1
+          fi
+
+          echo "Android 16 emulator smoke test passed for $COMPONENT (pid $pid)."
+
+      - name: Upload build and Android 16 emulator diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: APKbox-build-diagnostics
           path: |
             ${{ runner.temp }}/apkbox-build.log
+            ${{ runner.temp }}/apkbox-emulator.log
+            ${{ runner.temp }}/apkbox-emulator-*.txt
             app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Stop Android emulator
+        if: always()
+        shell: bash
+        run: |
+          adb emu kill || true
+          if [ -f "$RUNNER_TEMP/apkbox-emulator.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/apkbox-emulator.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload APKbox debug APK
         if: success()
