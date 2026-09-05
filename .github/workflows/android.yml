@@ -1,9 +1,28 @@
-name: Build APKbox + Android 16 Emulator
+name: Smart APKbox Validation · Android 16
 
 on:
   push:
     branches: [main, feature/remote-debug-bridge, feature/screen-agent]
+    paths:
+      - 'app/src/**'
+      - 'app/build.gradle.kts'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'scripts/ci/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
+    inputs:
+      differential:
+        description: 'Force stable-main → candidate differential/migration test'
+        required: false
+        type: boolean
+        default: false
+      full_fault_injection:
+        description: 'Force safe emulator process/recovery fault smoke'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: apkbox-${{ github.ref }}
@@ -17,12 +36,25 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout full history for change/LKG analysis
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify change and choose evidence
+        id: changes
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci/classify_changes.py
+
+      - name: Validate self-describing project contract
+        run: python3 scripts/ci/project_contract.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -30,7 +62,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
@@ -38,14 +70,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 16 SDK and emulator image
-        run: |
-          sdkmanager \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools" \
-            "emulator" \
-            "system-images;android-36;google_apis;x86_64"
+      - name: Install Android 16 build SDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Install API 36 emulator only when runtime evidence is needed
+        if: steps.changes.outputs.runtime == 'true'
+        run: sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"
 
       - name: Restore APKbox development signing key
         uses: actions/cache@v4
@@ -53,7 +83,7 @@ jobs:
           path: /home/runner/.apkbox-signing/debug.keystore
           key: apkbox-development-signing-v2
 
-      - name: Ensure APKbox development signing key
+      - name: Ensure stable APKbox development signing identity
         shell: bash
         run: |
           mkdir -p "$(dirname "$APKBOX_KEYSTORE")"
@@ -68,56 +98,72 @@ jobs:
               -keysize 2048 \
               -validity 10000
           fi
+          keytool -list -v -keystore "$APKBOX_KEYSTORE" -storepass android -alias androiddebugkey \
+            | grep 'SHA256:' | tee "$RUNNER_TEMP/apkbox-signing.txt"
 
-      - name: Show APKbox signing certificate
-        shell: bash
+      - name: Generate/check bridge contract from implementation
         run: |
-          keytool -list -v \
-            -keystore "$APKBOX_KEYSTORE" \
-            -storepass android \
-            -alias androiddebugkey | grep 'SHA256:'
+          python3 scripts/ci/bridge_contract.py --check --output "$RUNNER_TEMP/apkbox-bridge-contract.json"
+          cat "$RUNNER_TEMP/apkbox-bridge-contract.json"
 
-      - name: Unit test and build debug APK
+      - name: Unit test and build exact candidate
+        id: candidate
         shell: bash
         run: |
           set +e
-          gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace > "$RUNNER_TEMP/apkbox-build.log" 2>&1
+          tasks=":app:testDebugUnitTest"
+          if [ "${{ steps.changes.outputs.runtime }}" = "true" ]; then
+            tasks="$tasks :app:assembleDebug"
+          fi
+          gradle $tasks --stacktrace > "$RUNNER_TEMP/apkbox-build.log" 2>&1
           status=$?
           echo "--- APKbox build tail ---"
           tail -n 220 "$RUNNER_TEMP/apkbox-build.log"
-          exit $status
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
 
-      - name: Create and boot Android 16 emulator
+          if [ "${{ steps.changes.outputs.runtime }}" = "true" ]; then
+            APK="app/build/outputs/apk/debug/app-debug.apk"
+            sha="$(sha256sum "$APK" | awk '{print $1}')"
+            signer="$(apksigner verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {print $2; exit}')"
+            echo "candidate_sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "candidate_signer=$signer" >> "$GITHUB_OUTPUT"
+            printf 'candidateSha256=%s\ncandidateSignerSha256=%s\n' "$sha" "$signer" > "$RUNNER_TEMP/apkbox-candidate-identity.txt"
+          fi
+
+      - name: Build stable main as known-good only for high-risk/differential validation
+        id: lkg
+        if: steps.changes.outputs.runtime == 'true' && (steps.changes.outputs.differential == 'true' || inputs.differential == true)
         shell: bash
         run: |
           set -euo pipefail
-          echo no | avdmanager create avd \
-            --force \
-            --name "$APKBOX_AVD" \
-            --package "system-images;android-36;google_apis;x86_64"
+          LKG_SRC="$RUNNER_TEMP/apkbox-lkg-src"
+          git worktree add --detach "$LKG_SRC" origin/main
+          lkg_sha="$(git -C "$LKG_SRC" rev-parse HEAD)"
+          (
+            cd "$LKG_SRC"
+            gradle :app:assembleDebug --stacktrace > "$RUNNER_TEMP/apkbox-lkg-build.log" 2>&1
+          )
+          cp "$LKG_SRC/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/apkbox-lkg.apk"
+          lkg_apk_sha="$(sha256sum "$RUNNER_TEMP/apkbox-lkg.apk" | awk '{print $1}')"
+          echo "baseline_apk=$RUNNER_TEMP/apkbox-lkg.apk" >> "$GITHUB_OUTPUT"
+          echo "known_good_sha=$lkg_sha" >> "$GITHUB_OUTPUT"
+          echo "known_good_apk_sha=$lkg_apk_sha" >> "$GITHUB_OUTPUT"
+          printf 'knownGoodCommit=%s\nknownGoodApkSha256=%s\n' "$lkg_sha" "$lkg_apk_sha" > "$RUNNER_TEMP/apkbox-lkg-identity.txt"
 
-          if [ -e /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm || true
-          fi
-
-          nohup emulator \
-            -avd "$APKBOX_AVD" \
-            -no-window \
-            -noaudio \
-            -no-boot-anim \
-            -no-snapshot \
-            -wipe-data \
-            -gpu swiftshader_indirect \
+      - name: Create and boot deterministic Android 16 emulator
+        if: steps.changes.outputs.runtime == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo no | avdmanager create avd --force --name "$APKBOX_AVD" --package "system-images;android-36;google_apis;x86_64"
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm || true; fi
+          nohup emulator -avd "$APKBOX_AVD" -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect \
             > "$RUNNER_TEMP/apkbox-emulator.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/apkbox-emulator.pid"
-
           adb wait-for-device
           booted=0
           for _ in $(seq 1 150); do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-              booted=1
-              break
-            fi
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then booted=1; break; fi
             sleep 2
           done
           if [ "$booted" -ne 1 ]; then
@@ -126,82 +172,69 @@ jobs:
             exit 1
           fi
 
-          adb shell settings put global window_animation_scale 0 || true
-          adb shell settings put global transition_animation_scale 0 || true
-          adb shell settings put global animator_duration_scale 0 || true
-          adb shell getprop > "$RUNNER_TEMP/apkbox-emulator-getprop.txt"
-          adb shell wm size > "$RUNNER_TEMP/apkbox-emulator-wm.txt"
-          adb shell wm density >> "$RUNNER_TEMP/apkbox-emulator-wm.txt"
+      - name: Android 16 evidence, migration/differential and safe fault smoke
+        if: steps.changes.outputs.runtime == 'true'
+        env:
+          CANDIDATE_APK: app/build/outputs/apk/debug/app-debug.apk
+          BASELINE_APK: ${{ steps.lkg.outputs.baseline_apk }}
+          EVIDENCE_DIR: ${{ runner.temp }}/apkbox-evidence
+          CHANGE_CLASSES: ${{ steps.changes.outputs.categories }}
+          PHYSICAL_DEVICE_RECOMMENDED: ${{ steps.changes.outputs.physical_device }}
+          INSTALLER_SCENARIO: ${{ steps.changes.outputs.installer }}
+          FAULT_INJECTION: ${{ steps.changes.outputs.fault_injection == 'true' || inputs.full_fault_injection == true }}
+          KNOWN_GOOD_REF: main
+          KNOWN_GOOD_SHA: ${{ steps.lkg.outputs.known_good_sha }}
+        run: bash scripts/ci/emulator_validate.sh
 
-      - name: Android 16 APKbox runtime smoke test
+      - name: Publish concise validation summary
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          PKG="com.mekromn.apkbox"
-          COMPONENT="$PKG/.MainActivity"
-
-          adb install -r "$APK" | tee "$RUNNER_TEMP/apkbox-emulator-install.txt"
-          adb shell am force-stop "$PKG" || true
-          adb logcat -c
-
-          adb shell am start -W -n "$COMPONENT" | tee "$RUNNER_TEMP/apkbox-emulator-launch.txt"
-          sleep 4
-
-          pid="$(adb shell pidof "$PKG" | tr -d '\r' | awk '{print $1}')"
-          if [ -z "$pid" ]; then
-            echo "APKbox process is not alive after launch on Android 16" >&2
-            adb logcat -d -v threadtime > "$RUNNER_TEMP/apkbox-emulator-logcat.txt" || true
-            exit 1
-          fi
-          echo "$pid" > "$RUNNER_TEMP/apkbox-emulator-pid.txt"
-
-          adb shell dumpsys activity activities > "$RUNNER_TEMP/apkbox-emulator-activities.txt"
-          adb shell dumpsys activity top > "$RUNNER_TEMP/apkbox-emulator-activity-top.txt"
-          adb shell dumpsys package "$PKG" > "$RUNNER_TEMP/apkbox-emulator-package.txt"
-          adb shell dumpsys meminfo "$PKG" > "$RUNNER_TEMP/apkbox-emulator-meminfo.txt"
-          adb logcat --pid="$pid" -d -v threadtime > "$RUNNER_TEMP/apkbox-emulator-app-logcat.txt" || true
-          adb logcat -d -v threadtime -t 2500 > "$RUNNER_TEMP/apkbox-emulator-logcat.txt" || true
-
-          if ! grep -q "$PKG" "$RUNNER_TEMP/apkbox-emulator-activities.txt"; then
-            echo "APKbox did not appear in Android 16 activity state after launch" >&2
-            exit 1
+          echo "## APKbox smart validation" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Change classes: ${{ steps.changes.outputs.categories }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Runtime/emulator required: ${{ steps.changes.outputs.runtime }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Differential recommended: ${{ steps.changes.outputs.differential }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Physical-device follow-up recommended: ${{ steps.changes.outputs.physical_device }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/apkbox-evidence/evidence.json" ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUNNER_TEMP/apkbox-evidence/evidence.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if grep -E "FATAL EXCEPTION|Process $PKG has died|Force finishing activity.*$PKG" "$RUNNER_TEMP/apkbox-emulator-logcat.txt"; then
-            echo "APKbox fatal runtime signal detected on Android 16 emulator" >&2
-            exit 1
-          fi
-
-          echo "Android 16 emulator smoke test passed for $COMPONENT (pid $pid)."
-
-      - name: Upload build and Android 16 emulator diagnostics
-        if: always()
+      - name: Upload heavy diagnostics only on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: APKbox-build-diagnostics
+          name: APKbox-failure-evidence
           path: |
             ${{ runner.temp }}/apkbox-build.log
+            ${{ runner.temp }}/apkbox-lkg-build.log
             ${{ runner.temp }}/apkbox-emulator.log
-            ${{ runner.temp }}/apkbox-emulator-*.txt
+            ${{ runner.temp }}/apkbox-change-classification.json
+            ${{ runner.temp }}/apkbox-bridge-contract.json
+            ${{ runner.temp }}/apkbox-evidence/
             app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3
 
       - name: Stop Android emulator
-        if: always()
+        if: always() && steps.changes.outputs.runtime == 'true'
         shell: bash
         run: |
           adb emu kill || true
-          if [ -f "$RUNNER_TEMP/apkbox-emulator.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/apkbox-emulator.pid")" 2>/dev/null || true
-          fi
+          if [ -f "$RUNNER_TEMP/apkbox-emulator.pid" ]; then kill "$(cat "$RUNNER_TEMP/apkbox-emulator.pid")" 2>/dev/null || true; fi
 
-      - name: Upload APKbox debug APK
-        if: success()
+      - name: Upload exact candidate + compact evidence
+        if: success() && steps.changes.outputs.runtime == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: APKbox-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            ${{ runner.temp }}/apkbox-candidate-identity.txt
+            ${{ runner.temp }}/apkbox-change-classification.json
+            ${{ runner.temp }}/apkbox-bridge-contract.json
+            ${{ runner.temp }}/apkbox-evidence/evidence.json
+            ${{ runner.temp }}/apkbox-evidence/performance-verdict.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3

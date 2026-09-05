@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "project": "APKbox",
+  "repository": {
+    "fullName": "mekromn/APKbox",
+    "implementationPath": ".",
+    "agentsFile": "AGENTS.md"
+  },
+  "branches": {
+    "stable": "main",
+    "development": "feature/screen-agent"
+  },
+  "build": {
+    "commands": [
+      "gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace"
+    ],
+    "artifactPath": "app/build/outputs/apk/debug/app-debug.apk",
+    "applicationId": "com.mekromn.apkbox",
+    "mainActivity": "com.mekromn.apkbox/.MainActivity",
+    "jdk": 17,
+    "gradle": "8.13",
+    "compileSdk": 36,
+    "targetSdk": 36,
+    "minSdk": 26,
+    "signingIdentity": "persistent APKbox development key: androiddebugkey / CN=APKbox Development,O=mekromn,C=US"
+  },
+  "validation": {
+    "androidEmulatorFirst": true,
+    "androidApi": 36,
+    "unitCommands": ["gradle :app:testDebugUnitTest"],
+    "runtimeCommands": ["scripts/ci/emulator_validate.sh"],
+    "knownGoodRef": "main",
+    "evidenceManifest": "apkbox-evidence/evidence.json",
+    "highRiskPaths": [
+      "app/src/main/java/com/mekromn/apkbox/bridge/**",
+      "app/src/main/java/com/mekromn/apkbox/jobs/**",
+      "app/src/main/java/com/mekromn/apkbox/artifacts/**",
+      "app/src/main/java/com/mekromn/apkbox/data/**",
+      "app/src/main/java/com/mekromn/apkbox/model/**",
+      "app/src/main/java/com/mekromn/apkbox/*Installer*",
+      "app/src/main/AndroidManifest.xml"
+    ],
+    "physicalDeviceEscalation": [
+      "Shizuku/Sui/Wireless ADB behavior",
+      "Pixel/OEM-specific Android behavior",
+      "real hardware, thermal, storage, battery or radio behavior",
+      "emulator reproduction gap",
+      "explicit user request"
+    ]
+  },
+  "promotion": {
+    "lanes": ["experimental", "emulator-green", "device-needed", "device-green", "candidate", "stable"]
+  },
+  "invariants": [
+    "Continuity is the controller entrypoint; APKbox repo owns implementation.",
+    "Android 16/API 36 emulator evidence precedes physical-device debugging.",
+    "The exact APK bytes tested are the exact bytes archived/delivered; SHA-256 identifies a candidate.",
+    "Branch-aware APKbox runtime traffic uses Continuity apkbox-relay, never main.",
+    "Source substitution requires exact SHA-256 proof.",
+    "Mutating/dangerous bridge operations never inherit trusted read-only/debug authority.",
+    "Unexpected foreground package blocks remote UI mutation.",
+    "Signature conflicts never silently delete user app data.",
+    "Durable jobs never blindly replay after process interruption.",
+    "Do not merge feature/screen-agent into main without explicit user authorization."
+  ],
+  "rollback": {
+    "stableRef": "main",
+    "stableCheckpointSha": "88bfb6bd13d86c4fb4f64cbe5da0517019075e5d",
+    "rule": "Rollback uses an exact stable/LKG build with verified package/signing identity. Never cross a signing/data-loss boundary silently."
+  },
+  "artifactResolution": {
+    "rule": "Use the fastest trustworthy source that proves exact SHA-256 identity; APKbox vault is one candidate, not a privileged favorite."
+  },
+  "ciEconomics": {
+    "docsSkillsAgentMetadataTriggerAndroidCI": false,
+    "runtimeRelayConsumesContinuityActions": false,
+    "concurrencyCancelsObsoleteRuns": true,
+    "successArtifactRetentionDays": 3,
+    "failureDiagnosticsRetentionDays": 3,
+    "heavyDiagnosticsOnSuccess": false
+  }
+}

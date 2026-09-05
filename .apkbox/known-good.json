@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "project": "APKbox",
+  "stableRef": "main",
+  "pinnedCheckpointSha": "88bfb6bd13d86c4fb4f64cbe5da0517019075e5d",
+  "packageName": "com.mekromn.apkbox",
+  "signingPolicy": "Same persistent APKbox development key must be used for differential upgrade/rollback tests.",
+  "selectionRule": "Resolve stableRef at validation time; keep pinnedCheckpointSha as the last explicitly reviewed checkpoint until stable is deliberately promoted.",
+  "rollbackRule": "Rebuild or retrieve the exact stable candidate, verify SHA/package/signer, then use the narrowest safe install/rollback path. Never silently uninstall across a signature conflict.",
+  "updatedAt": "2026-09-05T15:14:54Z"
+}
