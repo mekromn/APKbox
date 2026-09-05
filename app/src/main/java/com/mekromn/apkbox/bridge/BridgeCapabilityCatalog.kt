@@ -6,8 +6,8 @@ import org.json.JSONObject
 /** Live self-describing contract published in every Continuity state.json heartbeat. */
 object BridgeCapabilityCatalog {
     const val PROTOCOL_VERSION = 7
-    const val CAPABILITY_SCHEMA = 6
-    const val SKILL_REVISION = "2026-09-05.1"
+    const val CAPABILITY_SCHEMA = 7
+    const val SKILL_REVISION = "2026-09-05.2"
     const val SKILL_REPOSITORY = "mekromn/Continuity"
     const val SKILL_PATH = "skills/apkbox-remote-bridge/SKILL.md"
     const val PROTOCOL_PATH = "bridge/README.md"
@@ -45,6 +45,28 @@ object BridgeCapabilityCatalog {
                 .put("path", SKILL_PATH)
                 .put("protocolPath", PROTOCOL_PATH)
                 .put("rule", "Read live state first, then the authoritative skill from Continuity main. If revisions differ, live state + the named Continuity skill win over memory/cached instructions."))
+            .put("testingPolicy", JSONObject()
+                .put("hardRule", "For Android code testing and debugging, establish an Android 16 / API 36 emulator baseline first. Gather emulator debugging evidence before using the physical APKbox bridge device.")
+                .put("primaryEnvironment", "Android 16 / API 36 emulator")
+                .put("debugEvidenceOrder", JSONArray(listOf(
+                    "API 36 emulator logcat/dumpsys/package/activity/process/UI evidence",
+                    "physical APKbox bridge device only when emulator evidence is insufficient or device hardware/OEM behavior is required"
+                )))
+                .put("emulatorFirstAlways", true)
+                .put("compileOnlyIsNotRuntimeValidation", true)
+                .put("physicalDeviceIsEscalation", true)
+                .put("physicalDeviceUseCases", JSONArray(listOf(
+                    "camera sensors/lenses and other physical hardware",
+                    "HDR/display and hardware codec behavior",
+                    "Pixel/OEM-specific Android behavior",
+                    "real Shizuku/Sui/Wireless ADB behavior",
+                    "thermal, sustained-performance, battery, radio or storage behavior",
+                    "issues the API 36 emulator cannot reproduce",
+                    "explicit user request for real-device confirmation"
+                )))
+                .put("hardwareSpecificRule", "Even hardware-specific changes get API 36 install/launch/smoke and meaningful non-hardware testing first, then physical-device validation.")
+                .put("comparisonRule", "When physical-device evidence is needed, retain emulator results as the baseline and identify the device-specific difference.")
+                .put("ciGate", "APKbox public-repo CI boots API 36, installs the exact signed debug APK, launches MainActivity, verifies process/activity survival, and archives emulator logcat/dumpsys diagnostics."))
             .put("privilegedTransport", JSONObject()
                 .put("ready", privileged.ready)
                 .put("active", privileged.activeLabel)
@@ -162,6 +184,7 @@ object BridgeCapabilityCatalog {
                     .put("freshApprovalForStart", true)
                     .put("universalResumeCommand", "JOB_RESUME")))
             .put("deviceCapabilities", JSONArray(listOf(
+                "android_16_emulator_first_testing_policy",
                 "dedicated_zero_actions_runtime_relay_branch",
                 "privileged_shell_shizuku_sui_or_wireless_adb",
                 "wireless_adb_auto_heal",
