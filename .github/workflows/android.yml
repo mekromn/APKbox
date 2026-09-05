@@ -170,9 +170,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo no | avdmanager create avd --force --name "$APKBOX_AVD" --package "system-images;android-36;google_apis;x86_64"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+
+          AVDMANAGER=""
+          for candidate in \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+            "$ANDROID_HOME/cmdline-tools/16.0/bin/avdmanager"; do
+            if [ -x "$candidate" ]; then
+              AVDMANAGER="$candidate"
+              break
+            fi
+          done
+          if [ -z "$AVDMANAGER" ]; then
+            AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/avdmanager' -perm -111 | sort -V | tail -n 1)"
+          fi
+          test -n "$AVDMANAGER"
+          test -x "$AVDMANAGER"
+
+          printf 'no\n' | "$AVDMANAGER" create avd \
+            --force \
+            --name "$APKBOX_AVD" \
+            --package "system-images;android-36;google_apis;x86_64"
+
+          echo "Created AVD files:"
+          find "$ANDROID_USER_HOME" -maxdepth 3 -type f -o -type d | sort | head -n 120
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee "$RUNNER_TEMP/apkbox-avds.txt"
+          grep -Fx "$APKBOX_AVD" "$RUNNER_TEMP/apkbox-avds.txt"
+
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm || true; fi
-          nohup emulator -avd "$APKBOX_AVD" -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect \
+          nohup "$ANDROID_HOME/emulator/emulator" -avd "$APKBOX_AVD" \
+            -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect \
             > "$RUNNER_TEMP/apkbox-emulator.log" 2>&1 &
           emulator_pid=$!
           echo "$emulator_pid" > "$RUNNER_TEMP/apkbox-emulator.pid"
