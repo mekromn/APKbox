@@ -29,6 +29,7 @@ class GitHubRelayClient {
         private const val API_VERSION = "2022-11-28"
         private const val MAX_RESPONSE_CHARS = 3_500_000
         private const val MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+        const val RELAY_BRANCH = "apkbox-relay"
         private val runIdRegex = Regex("[A-Za-z0-9._-]{1,96}")
     }
 
@@ -40,7 +41,12 @@ class GitHubRelayClient {
             path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}",
         )
         val json = JSONObject(response.body)
-        "Connected to ${json.optString("full_name", "${config.repoOwner}/${config.repoName}")}"
+        request(
+            token = token,
+            method = "GET",
+            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/branches/${encode(RELAY_BRANCH)}",
+        )
+        "Connected to ${json.optString("full_name", "${config.repoOwner}/${config.repoName}")} · relay branch $RELAY_BRANCH"
     }
 
     suspend fun fetchInbox(config: BridgeConfig, token: String): List<RelayInboxItem> = withContext(Dispatchers.IO) {
@@ -48,7 +54,7 @@ class GitHubRelayClient {
         val listing = requestOrNull(
             token,
             "GET",
-            "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(base)}",
+            contentsReadPath(config, base),
         ) ?: return@withContext emptyList()
         val array = runCatching { JSONArray(listing.body) }.getOrElse { return@withContext emptyList() }
         val items = ArrayList<RelayInboxItem>()
@@ -73,7 +79,7 @@ class GitHubRelayClient {
         val safeRun = runId.trim()
         require(runIdRegex.matches(safeRun)) { "Invalid autonomous run ID." }
         val path = "bridge/devices/${config.deviceId}/plans/$safeRun.json"
-        val file = getTextFile(config, token, path) ?: error("Autonomous plan is missing: $path")
+        val file = getTextFile(config, token, path) ?: error("Autonomous plan is missing on $RELAY_BRANCH: $path")
         val plan = AutonomousPlan.fromJson(JSONObject(file.text))
         require(plan.runId == safeRun) { "Plan run ID does not match AGENT_START request." }
         plan
@@ -87,7 +93,7 @@ class GitHubRelayClient {
         val safeBuild = buildId.trim()
         require(runIdRegex.matches(safeBuild)) { "Invalid build candidate ID." }
         val path = "bridge/devices/${config.deviceId}/builds/$safeBuild.json"
-        val file = getTextFile(config, token, path) ?: error("Build candidate is missing: $path")
+        val file = getTextFile(config, token, path) ?: error("Build candidate is missing on $RELAY_BRANCH: $path")
         val candidate = BuildCandidate.fromJson(JSONObject(file.text))
         require(candidate.buildId == safeBuild) { "Build manifest ID does not match the requested build." }
         candidate
@@ -109,7 +115,7 @@ class GitHubRelayClient {
         }
         requestBytes(
             token = token,
-            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(safePath)}",
+            path = contentsReadPath(config, safePath),
             maxBytes = MAX_ARTIFACT_BYTES,
         )
     }
@@ -123,6 +129,7 @@ class GitHubRelayClient {
         val path = "bridge/devices/${config.deviceId}/runs/${checkpoint.runId}/checkpoint.json"
         val json = checkpoint.toJson()
             .put("deviceId", config.deviceId)
+            .put("relayBranch", RELAY_BRANCH)
             .put("publishedAtEpochMs", System.currentTimeMillis())
         putJson(config, token, path, json, "APKbox agent checkpoint ${checkpoint.runId}")
         path
@@ -137,6 +144,7 @@ class GitHubRelayClient {
         val path = "bridge/devices/${config.deviceId}/build-runs/${checkpoint.runId}/checkpoint.json"
         val json = checkpoint.toJson()
             .put("deviceId", config.deviceId)
+            .put("relayBranch", RELAY_BRANCH)
             .put("publishedAtEpochMs", System.currentTimeMillis())
         putJson(config, token, path, json, "APKbox build checkpoint ${checkpoint.runId}")
         path
@@ -144,7 +152,7 @@ class GitHubRelayClient {
 
     suspend fun writeResult(config: BridgeConfig, token: String, result: BridgeResult) = withContext(Dispatchers.IO) {
         val path = "bridge/devices/${config.deviceId}/outbox/${result.requestId}.json"
-        putJson(config, token, path, result.toJson(config.deviceId), "APKbox bridge result ${result.requestId}")
+        putJson(config, token, path, result.toJson(config.deviceId).put("relayBranch", RELAY_BRANCH), "APKbox bridge result ${result.requestId}")
     }
 
     suspend fun writeArtifact(
@@ -175,7 +183,7 @@ class GitHubRelayClient {
             status = BridgeResultStatus.AWAITING_APPROVAL,
             risk = risk,
             detail = "Waiting for approval on the device.",
-        ).toJson(config.deviceId)
+        ).toJson(config.deviceId).put("relayBranch", RELAY_BRANCH)
         putJson(config, token, path, json, "APKbox bridge awaiting approval ${request.id}")
     }
 
@@ -188,6 +196,7 @@ class GitHubRelayClient {
         val json = JSONObject()
             .put("schema", 7)
             .put("deviceId", config.deviceId)
+            .put("relayBranch", RELAY_BRANCH)
             .put("manufacturer", Build.MANUFACTURER)
             .put("model", Build.MODEL)
             .put("androidApi", Build.VERSION.SDK_INT)
@@ -222,6 +231,7 @@ class GitHubRelayClient {
                 "agent_checkpoint", "agent_plan", "build_candidate", "build_checkpoint",
                 "universal_durable_jobs", "content_addressed_artifact_cache", "fastest_exact_source_resolution",
                 "exact_apk_inventory_inspection", "exact_apk_chunked_pull",
+                "dedicated_zero_actions_runtime_relay_branch",
                 "unattended_verified_install", "privileged_transport_shizuku_sui_or_wireless_adb",
                 "wireless_adb_auto_heal", "wireless_adb_persistent_self_start"
             )))
@@ -243,11 +253,12 @@ class GitHubRelayClient {
         val body = JSONObject()
             .put("message", "APKbox consumed bridge request $requestId")
             .put("sha", sha)
+            .put("branch", RELAY_BRANCH)
             .toString()
         requestOrNull(
             token = token,
             method = "DELETE",
-            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
+            path = contentsWritePath(config, path),
             body = body,
         )
         Unit
@@ -259,7 +270,7 @@ class GitHubRelayClient {
         val response = requestOrNull(
             token,
             "GET",
-            "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
+            contentsReadPath(config, path),
         ) ?: return null
         val json = JSONObject(response.body)
         val encoded = json.optString("content").replace("\n", "")
@@ -272,7 +283,7 @@ class GitHubRelayClient {
         val response = requestOrNull(
             token,
             "GET",
-            "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
+            contentsReadPath(config, path),
         ) ?: return null
         return JSONObject(response.body).optString("sha").takeIf { it.isNotBlank() }
     }
@@ -302,11 +313,12 @@ class GitHubRelayClient {
         val body = JSONObject()
             .put("message", commitMessage.take(180))
             .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            .put("branch", RELAY_BRANCH)
         if (!existingSha.isNullOrBlank()) body.put("sha", existingSha)
         request(
             token = token,
             method = "PUT",
-            path = "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}",
+            path = contentsWritePath(config, path),
             body = body.toString(),
         )
     }
@@ -378,7 +390,7 @@ class GitHubRelayClient {
                 throw RelayHttpException(code, apiMessage?.takeIf { it.isNotBlank() } ?: "GitHub relay HTTP $code")
             }
             val declared = connection.contentLengthLong
-            require(declared < 0L || declared <= maxBytes.toLong()) { "Picture message exceeds the $maxBytes-byte relay limit." }
+            require(declared < 0L || declared <= maxBytes.toLong()) { "Relay artifact exceeds the $maxBytes-byte limit." }
             val output = ByteArrayOutputStream(minOf(maxBytes, 256 * 1024))
             connection.inputStream.use { input ->
                 val buffer = ByteArray(32 * 1024)
@@ -387,17 +399,23 @@ class GitHubRelayClient {
                     val count = input.read(buffer)
                     if (count < 0) break
                     total += count
-                    require(total <= maxBytes) { "Picture message exceeds the $maxBytes-byte relay limit." }
+                    require(total <= maxBytes) { "Relay artifact exceeds the $maxBytes-byte limit." }
                     output.write(buffer, 0, count)
                 }
             }
             val bytes = output.toByteArray()
-            require(bytes.isNotEmpty()) { "Picture message image is empty." }
+            require(bytes.isNotEmpty()) { "Relay artifact is empty." }
             return bytes
         } finally {
             connection.disconnect()
         }
     }
+
+    private fun contentsWritePath(config: BridgeConfig, path: String): String =
+        "/repos/${encode(config.repoOwner)}/${encode(config.repoName)}/contents/${encodePath(path)}"
+
+    private fun contentsReadPath(config: BridgeConfig, path: String): String =
+        contentsWritePath(config, path) + "?ref=${encode(RELAY_BRANCH)}"
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, "UTF-8").replace("+", "%20")
