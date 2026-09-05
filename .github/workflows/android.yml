@@ -38,6 +38,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout full history for change/LKG analysis
@@ -152,6 +153,7 @@ jobs:
 
       - name: Create and boot deterministic Android 16 emulator
         if: steps.changes.outputs.runtime == 'true'
+        timeout-minutes: 6
         shell: bash
         run: |
           set -euo pipefail
@@ -159,21 +161,37 @@ jobs:
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm || true; fi
           nohup emulator -avd "$APKBOX_AVD" -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect \
             > "$RUNNER_TEMP/apkbox-emulator.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/apkbox-emulator.pid"
-          adb wait-for-device
+          emulator_pid=$!
+          echo "$emulator_pid" > "$RUNNER_TEMP/apkbox-emulator.pid"
+
+          if ! timeout 120 adb wait-for-device; then
+            echo "Android emulator did not register with ADB within 120 seconds" >&2
+            tail -n 240 "$RUNNER_TEMP/apkbox-emulator.log" || true
+            exit 1
+          fi
+
           booted=0
-          for _ in $(seq 1 150); do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then booted=1; break; fi
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              echo "Android emulator process exited before boot completed" >&2
+              tail -n 240 "$RUNNER_TEMP/apkbox-emulator.log" || true
+              exit 1
+            fi
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              booted=1
+              break
+            fi
             sleep 2
           done
           if [ "$booted" -ne 1 ]; then
-            echo "Android 16 emulator failed to complete boot" >&2
-            tail -n 200 "$RUNNER_TEMP/apkbox-emulator.log" || true
+            echo "Android 16 emulator failed to complete boot within the bounded window" >&2
+            tail -n 240 "$RUNNER_TEMP/apkbox-emulator.log" || true
             exit 1
           fi
 
       - name: Android 16 evidence, migration/differential and safe fault smoke
         if: steps.changes.outputs.runtime == 'true'
+        timeout-minutes: 8
         env:
           CANDIDATE_APK: app/build/outputs/apk/debug/app-debug.apk
           BASELINE_APK: ${{ steps.lkg.outputs.baseline_apk }}
