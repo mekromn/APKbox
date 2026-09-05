@@ -3,15 +3,16 @@ name: apkbox-remote-bridge
 description: >-
   Use when ChatGPT/Codex needs to debug, inspect, control, test, automate, communicate with,
   retrieve APKs from, or deploy builds to Android through APKbox Remote Debug Bridge. Runtime
-  relay traffic uses the dedicated private Continuity branch `apkbox-relay`; operator code/docs
-  and the authoritative skill stay on `main`.
+  relay traffic uses private Continuity branch `apkbox-relay`; operator code/docs/skill stay on
+  `main`. Android code testing/debugging is Android 16/API 36 emulator first, with the physical
+  APKbox bridge device used only when needed after the emulator baseline.
 ---
 
 # APKbox Remote Debug Bridge
 
-**Forwarding-stub revision:** `2026-09-05.1`  
+**Forwarding-stub revision:** `2026-09-05.2`  
 **Bridge protocol:** `7`  
-**Capability schema:** `6`  
+**Capability schema:** `7`  
 **Request/result schema:** `7`
 
 Authoritative private skill on Continuity `main`:
@@ -20,27 +21,40 @@ Authoritative private skill on Continuity `main`:
 
 ## Hard branch rule
 
-- Current runtime branch: **`apkbox-relay`**.
+- Runtime branch: **`apkbox-relay`**.
 - Operator code/docs/skills branch: **`main`**.
-- All branch-aware `bridge/devices/**` reads/writes/deletes must use `apkbox-relay`; never rely on the repository default branch.
-- During migration only, if no fresh branch-aware state exists, a fresh legacy state on `main` may be used temporarily. Once a device advertises `relayBranch: "apkbox-relay"`, ignore legacy runtime files on `main` for that device permanently.
+- Branch-aware `bridge/devices/**` reads/writes/deletes must use `apkbox-relay`; never rely on repository default branch.
+- Migration only: use fresh legacy `main` state only until a device advertises `relayBranch: "apkbox-relay"`; then ignore legacy runtime state on `main` for that device.
 - Never split one request across branches.
+
+## Hard testing/debugging rule
+
+For Android code work:
+
+1. **Android 16 / API 36 emulator first.**
+2. Install/launch the exact signed test APK and gather emulator logcat/dumpsys/package/activity/process/UI evidence first.
+3. Use the physical APKbox bridge device only when emulator evidence is insufficient or real hardware/OEM/device behavior is required.
+4. Hardware-specific work still gets API 36 install/launch/smoke and meaningful non-hardware tests first, then physical-device validation.
+5. Preserve emulator evidence as the baseline and compare what differs on-device.
+6. Compile-only is not runtime validation when the path can be exercised on the emulator.
+
+Physical-device escalation includes camera sensors/lenses, HDR/display, hardware codecs/radios/biometrics, Pixel/OEM-specific behavior, real Shizuku/Sui/WADB behavior, thermal/sustained-performance/battery/storage behavior, emulator reproduction gaps, or explicit user request for real-device confirmation.
 
 When this skill applies:
 
 1. Discover fresh runtime `state.json` using the branch migration rule; never hard-code a device ID.
-2. Treat live `remoteCommandTypes` as executable truth. Read `relay`, `artifactResolution`, `durableJobs`, `inventory`, `apkRetrieval`, `privilegedTransport`, `advancedWorkflows`, `securityContract`, `limits`, and `knownLimitations`.
-3. Read the authoritative Continuity skill from `main` before acting. If revisions differ, live state + the Continuity skill win.
-4. **Fastest trustworthy exact source wins.** Never substitute APK/build bytes by package/title/version/signer alone; exact SHA-256 proof is required.
-5. Use structured inventory instead of asking the user for IDs APKbox can report: `PROJECT_LIST/GET`, `APK_LIST/SEARCH`, `PACKAGE_STATE`, `INSTALLED_APPS`, `DEVICE_STATE`.
+2. Treat live `remoteCommandTypes` as executable truth. Read `relay`, `testingPolicy`, `artifactResolution`, `durableJobs`, `inventory`, `apkRetrieval`, `privilegedTransport`, `advancedWorkflows`, `securityContract`, `limits`, and `knownLimitations`.
+3. Read the authoritative Continuity skill from `main` before acting. If revisions differ, live state + Continuity skill win.
+4. **Fastest trustworthy exact source wins.** Exact SHA-256 proof is required before substituting APK/build bytes.
+5. Use structured inventory instead of asking for discoverable IDs: `PROJECT_LIST/GET`, `APK_LIST/SEARCH`, `PACKAGE_STATE`, `INSTALLED_APPS`, `DEVICE_STATE`.
 6. Prefer `APK_INSPECT`; use `APK_PULL` only when exact binary bytes are materially needed.
 7. Use `JOB_LIST/STATUS/CANCEL/RESUME` for long operations. Never repeat a start to implicitly resume an old job. Cancelled job IDs are terminal.
-8. `JOB_RESUME` uses the original persisted payload and always needs fresh approval. `JOB_CANCEL` stops only at a safe cancellable boundary.
-9. Prefer structured `APK_INSTALL_URL` over ad-hoc shell when a direct HTTPS APK URL exists. Include expected SHA/package when known.
+8. `JOB_RESUME` uses the persisted original payload and always needs fresh approval.
+9. Prefer structured `APK_INSTALL_URL` over ad-hoc shell when a direct HTTPS APK URL exists; include expected SHA/package when known.
 10. Do not force Wireless ADB when Shizuku/Sui is healthy.
-11. Use the least intrusive useful agent message format. Security approval presentation remains user-controlled.
+11. Use the least intrusive useful message format; security approval presentation remains user-controlled.
 12. Never expose Continuity relay/build-source tokens.
-13. Never claim a full APK was pulled/reassembled when the current controller cannot retrieve the exact published chunks.
+13. Never claim a full APK was pulled/reassembled when the current controller cannot retrieve the exact chunks.
 14. Prefer APKbox Bridge over manual ADB/LADB copy-paste whenever live structured capabilities cover the task.
 
-“Work freely” means agents discover and use the live platform without repeated protocol tutoring while preserving exact-byte integrity, local approvals, at-most-once execution, branch isolation and user control.
+“Work freely” means agents discover and use the live platform without repeated protocol tutoring while preserving exact-byte integrity, local approvals, emulator-first evidence, at-most-once execution, branch isolation and user control.
